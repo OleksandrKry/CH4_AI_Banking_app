@@ -118,12 +118,13 @@ class RAGSystem {
     
     // MARK: - Utilities & Tokenizers
     
-    private func fetchLocalDocuments() -> [LocalDocument] {
+    // Note: `internal` (not `private`) so the test target can exercise them directly.
+    func fetchLocalDocuments() -> [LocalDocument] {
         let descriptor = FetchDescriptor<LocalDocument>()
         return (try? modelContext.fetch(descriptor)) ?? []
     }
-    
-    private func fetchRecentChatHistory(limit: Int) -> [ChatMessage] {
+
+    func fetchRecentChatHistory(limit: Int) -> [ChatMessage] {
         var descriptor = FetchDescriptor<ChatMessage>(sortBy: [SortDescriptor(\.timestamp, order: .reverse)])
         descriptor.fetchLimit = limit
         let recentDescending = (try? modelContext.fetch(descriptor)) ?? []
