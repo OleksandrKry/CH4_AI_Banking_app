@@ -51,7 +51,8 @@ struct BM25SearchTests {
     /// `@Model` instances can be created directly, without a `ModelContext`,
     /// which lets us exercise the ranking logic in isolation.
     private func makeDoc(_ id: String, _ chunk: String) -> LocalDocument {
-        LocalDocument(id: id, chunk: chunk, category: "test", source: "test", embedding: [])
+        LocalDocument(id: id, chunk: chunk, category: "test", source: "test", embedding: [],
+                      minIncome: 0, annualFee: 0, maxLimit: 0)
     }
 
     @Test func exactKeywordMatchRanksHighest() {
@@ -100,7 +101,8 @@ struct VectorSearchTests {
                 chunk: text,
                 category: "test",
                 source: "test",
-                embedding: embedding.vector(for: text) ?? []
+                embedding: embedding.vector(for: text) ?? [],
+                minIncome: 0, annualFee: 0, maxLimit: 0
             )
         }
 

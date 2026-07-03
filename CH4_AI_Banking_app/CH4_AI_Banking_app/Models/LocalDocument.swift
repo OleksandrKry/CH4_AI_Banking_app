@@ -8,20 +8,27 @@
 import Foundation
 import SwiftData
 
-// MARK: - SwiftData Entity: Local Persistent Storage
 @Model
 final class LocalDocument {
     @Attribute(.unique) var id: String
-    var chunk: String       // The rich context narrative sentence block
-    var category: String    // Metadata column for easy UI grouping if needed
-    var source: String      // Track provenance (e.g., "bca_products.json")
-    var embedding: [Double] // 512-dimension vector from Apple NLP
+    var chunk: String
+    var category: String
+    var source: String
+    var embedding: [Double]
     
-    init(id: String, chunk: String, category: String, source: String, embedding: [Double]) {
+    // NEW: Explicit numerical columns for low-code database pre-filtering
+    var minIncome: Double  // E.g., 3000000.0
+    var annualFee: Double  // E.g., 125000.0
+    var maxLimit: Double   // E.g., 3000000.0 (0.0 if approval-based)
+    
+    init(id: String, chunk: String, category: String, source: String, embedding: [Double], minIncome: Double, annualFee: Double, maxLimit: Double) {
         self.id = id
         self.chunk = chunk
         self.category = category
         self.source = source
         self.embedding = embedding
+        self.minIncome = minIncome
+        self.annualFee = annualFee
+        self.maxLimit = maxLimit
     }
 }
