@@ -1,0 +1,177 @@
+[
+    {
+        "name": "BCA Everyday Card",
+        "category": "Credit Card",
+        "description": "Entry-level card for daily shopping and bills.",
+        "price": "IDR 125,000\/year",
+        "fees": "Late fee: 1% (max IDR 100,000); Cash advance: 3% (min IDR 40,000); Overlimit: IDR 40,000; Replacement card:IDR 50,000 (www.bca.co.id)",
+        "limits": "Min limit IDR 3M",
+        "requirements": "Age 21–65, Indonesian citizen, income ≥ IDR 3M\/month",
+        "benefits & features": "Reward BCA, installments, merchant discounts",
+        "min_apply": "IDR 3M\/month"
+    },
+    {
+        "name": "BCA Card Platinum",
+        "category": "Credit Card",
+        "description": "Premium BCA Card with higher spending capacity.",
+        "price": "IDR 125,000\/year",
+        "fees": "Late fee: 1% (max IDR 100,000); Cash advance: 4% (min IDR 40,000); Overlimit: IDR 40,000 (www.bca.co.id)",
+        "limits": "Higher limit",
+        "requirements": "Age 21–65, income ≥ IDR 3M\/month",
+        "benefits & features": "More Reward BCA, travel insurance, promotions",
+        "min_apply": "IDR 3M\/month"
+    },
+    {
+        "name": "BCA Visa Batman",
+        "category": "Credit Card",
+        "description": "Visa card with Batman-themed design.",
+        "price": "IDR 125,000\/year",
+        "fees": "Same as BCA Visa Classic: Late fee 1%; Cash advance 4% (min IDR 40,000); Overlimit IDR 40,000",
+        "limits": "Based on approval",
+        "requirements": "Age 21–65",
+        "benefits & features": "Reward BCA, Visa benefits, promotions",
+        "min_apply": "IDR 3M\/month"
+    },
+    {
+        "name": "BCA Visa Black",
+        "category": "Credit Card",
+        "description": "Premium Visa card for high-spending customers.",
+        "price": "IDR 450,000\/year",
+        "fees": "Late fee: 1% (max IDR 100,000); Cash advance: 4% (min IDR 40,000); Overlimit: Free; Replacement card:Free (www.bca.co.id)",
+        "limits": "High credit limit",
+        "requirements": "Age 21–65",
+        "benefits & features": "Visa privileges, travel benefits, Reward BCA",
+        "min_apply": "IDR 3M\/month"
+    },
+    {
+        "name": "BCA Mastercard Globe",
+        "category": "Credit Card",
+        "description": "Lifestyle Mastercard for everyday and overseas use.",
+        "price": "IDR 125,000\/year",
+        "fees": "Late fee: 1% (max IDR 100,000); Cash advance: 4% (min IDR 40,000); Overlimit: IDR 40,000 (www.bca.co.id)",
+        "limits": "Based on approval",
+        "requirements": "Age 21–65",
+        "benefits & features": "Mastercard benefits, Reward BCA",
+        "min_apply": "IDR 3M\/month"
+    },
+    {
+        "name": "BCA Mastercard Black",
+        "category": "Credit Card",
+        "description": "Premium Mastercard with lifestyle and travel privileges.",
+        "price": "IDR 450,000\/year",
+        "fees": "Late fee: 1% (max IDR 100,000); Cash advance: 4% (min IDR 40,000); Overlimit: Free; Replacement card:Free (www.bca.co.id)",
+        "limits": "High credit limit",
+        "requirements": "Age 21–65",
+        "benefits & features": "Travel benefits, Reward BCA, promotions",
+        "min_apply": "IDR 3M\/month"
+    },
+    {
+        "name": "BCA Mastercard World",
+        "category": "BCA Mastercard World",
+        "description": "World Mastercard with premium travel privileges.",
+        "price": "IDR 1,000,000\/year",
+        "fees": "Late fee: 1% (max IDR 100,000); Cash advance: 4% (min IDR 40,000); Overlimit: Free; Replacement card:Free (www.bca.co.id)",
+        "limits": "Premium limit (min IDR 50M)",
+        "requirements": "Age 21–65",
+        "benefits & features": "Concierge, airport lounge, travel perks",
+        "min_apply": "IDR 3M\/month"
+    },
+    {
+        "name": "BCA JCB Black",
+        "category": "Credit Card",
+        "description": "Premium JCB card with Japan-focused privileges.",
+        "price": "IDR 450,000\/year",
+        "fees": "Same premium fee schedule: Late fee 1%; Cash advance 4% (min IDR 40,000); Overlimit Free",
+        "limits": "High credit limit",
+        "requirements": "Age 21–65",
+        "benefits & features": "JCB Plaza Lounge, Japan offers",
+        "min_apply": "IDR 3M\/month"
+    },
+    {
+        "name": "BCA UnionPay",
+        "category": "Credit Card",
+        "description": "UnionPay card optimized for Asia and China.",
+        "price": "IDR 125,000\/year",
+        "fees": "Late fee 1%; Cash advance 4% (min IDR 40,000); Overlimit IDR 40,000",
+        "limits": "Based on approval",
+        "requirements": "Age 21–65",
+        "benefits & features": "UnionPay acceptance, promotions",
+        "min_apply": "IDR 3M\/month"
+    },
+    {
+        "name": "BCA Singapore Airlines KrisFlyer Visa Signature",
+        "category": "Travel Credit Card",
+        "description": "Earn KrisFlyer miles through spending.",
+        "price": "IDR 500,000\/year",
+        "fees": "Late fee 1%; Cash advance 4% (min IDR 40,000); Overlimit Free",
+        "limits": "Based on approval",
+        "requirements": "Age 21–65",
+        "benefits & features": "KrisFlyer miles, travel insurance",
+        "min_apply": "IDR 3M\/month"
+    },
+    {
+        "name": "BCA Singapore Airlines KrisFlyer Visa Infinite",
+        "category": "Travel Credit Card",
+        "description": "Premium airline card with accelerated KrisFlyer miles.",
+        "price": "IDR 1,000,000\/year",
+        "fees": "Late fee 1%; Cash advance 4% (min IDR 40,000); Overlimit Free",
+        "limits": "Min limit IDR 50M",
+        "requirements": "Age 21–65",
+        "benefits & features": "Faster miles, premium travel benefits",
+        "min_apply": "IDR 3M\/month"
+    },
+    {
+        "name": "BCA Singapore Airlines PPS Club Visa Infinite",
+        "category": "BCA Singapore Airlines PPS Club Visa Infinite",
+        "description": "Premium card for PPS Club members.",
+        "price": "Invitation only",
+        "fees": "Premium fee schedule",
+        "limits": "Premium limit",
+        "requirements": "Eligible PPS Club member",
+        "benefits & features": "Airline privileges, concierge",
+        "min_apply": "Contact BCA"
+    },
+    {
+        "name": "BCA tiket.com Mastercard",
+        "category": "Co-branded Credit Card",
+        "description": "Travel rewards card with tiket.com benefits.",
+        "price": "IDR 125,000\/year",
+        "fees": "Late fee 1%; Cash advance 4% (min IDR 40,000); Overlimit IDR 40,000",
+        "limits": "Based on approval",
+        "requirements": "Age 21–65",
+        "benefits & features": "tiket.com discounts, Reward BCA",
+        "min_apply": "IDR 3M\/month"
+    },
+    {
+        "name": "BCA Blibli Mastercard",
+        "category": "Co-branded Credit Card",
+        "description": "Shopping card with Blibli rewards.",
+        "price": "IDR 125,000\/year",
+        "fees": "Late fee 1%; Cash advance 4% (min IDR 40,000); Overlimit IDR 40,000",
+        "limits": "Based on approval",
+        "requirements": "Age 21–65",
+        "benefits & features": "Blibli promotions, Reward BCA",
+        "min_apply": "IDR 3M\/month"
+    },
+    {
+        "name": "BCA American Express Platinum",
+        "category": "Premium Credit Card",
+        "description": "Invitation-only premium American Express card.",
+        "price": "Contact BCA",
+        "fees": "Premium fee schedule",
+        "limits": "Premium limit",
+        "requirements": "Invitation only",
+        "benefits & features": "Airport lounges, concierge, luxury travel",
+        "min_apply": "Invitation only"
+    },
+    {
+        "name": "KKB BCA",
+        "category": "Car Loans",
+        "description": "Secured auto financing for new\/used passenger cars or refinancing.",
+        "price": "2.70% flat p.a. (3-year tenor); or 5-year Fix & Cap (5.00% first 3 years, 6.77% next 2 years).",
+        "fees": "1% provision fee; Fiduciary fees: IDR 300k (<IDR ( 2M 50M) IDR to>IDR 1B).",
+        "limits": "Monthly income must be >= 3x the requested installment amount.  ",
+        "requirements": "Age 21–64 at loan maturity, >= 2 years permanent work\/business history, comprehensive insurance.  ",
+        "benefits & features": "Flat rate stability, hybrid Fix & Cap certainty, refinancing against BPKB."
+    }
+]

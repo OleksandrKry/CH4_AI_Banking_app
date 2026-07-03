@@ -17,7 +17,7 @@ struct RawRow: Codable {
     let limits: String
     let requirements: String
     let benefitsAndFeatures: String
-    let minApply: String
+    let minApply: String? // Optional: some products (e.g. car loans) omit "min_apply".
     
     enum CodingKeys: String, CodingKey {
         case name, category, description, price, fees, limits, requirements
@@ -37,6 +37,6 @@ func buildContextualChunk(from row: RawRow) -> String {
     Transaction, Credit, & Cash Withdrawal Limits: \(row.limits) | \
     Requirements to Apply & Eligibility Criteria: \(row.requirements) | \
     Product Benefits & Key Features: \(row.benefitsAndFeatures) | \
-    Minimum Income Requirement to Apply: \(row.minApply)
+    Minimum Income Requirement to Apply: \(row.minApply ?? "Not specified")
     """
 }
