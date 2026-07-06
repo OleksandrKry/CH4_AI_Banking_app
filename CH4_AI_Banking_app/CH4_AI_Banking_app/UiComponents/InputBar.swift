@@ -19,7 +19,7 @@ struct InputBar: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            Image(systemName: "plus")
+            Image(systemName: "microphone.fill")
                 .font(.body)
                 .foregroundStyle(Theme.textSecondary)
                 .frame(width: 44, height: 44)
