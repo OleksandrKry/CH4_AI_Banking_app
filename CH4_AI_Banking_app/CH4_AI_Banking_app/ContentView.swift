@@ -80,13 +80,50 @@ private struct ChatScreen: View {
     // MARK: - Sections
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text("Banking Assistant")
-                .font(.largeTitle).fontWeight(.bold)
-                .foregroundStyle(Theme.textPrimary)
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 16) {
+                ZStack {
+                    Circle()
+                        .frame(width: 50, height: 50).foregroundColor(Theme.brandSurface)
+                    
+                    Image(systemName: "apple.intelligence")
+                        .font(.subheadline)
+                }
+                
+                VStack(alignment: .leading) {
+                    Text("Assistant")
+                        .font(.title2)
+                        .bold()
+                    Text("Always here to help")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                }
+                
+                Spacer()
+                
+                Button(
+                    action: {
+                        // TODO: add new chat
+                    },
+                    label: {
+                        Image(systemName: "plus")
+                            .foregroundStyle(.white)
+                    }
+                )
+                .frame(width: 50, height: 50)
+                .clipShape(Circle())
+                .overlay(
+                    Circle()
+                        .stroke(Theme.textTertiary, lineWidth: 1)
+                )
+            }
+            .padding(.horizontal)
+            
+            Divider()
+                .background(Theme.hairline)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal)
+//        .padding(.horizontal)
         .padding(.top, 8)
     }
 
