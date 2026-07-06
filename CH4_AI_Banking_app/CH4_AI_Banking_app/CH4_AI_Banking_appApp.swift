@@ -11,19 +11,7 @@ import NaturalLanguage
 
 @main
 struct CH4_AI_Banking_appApp: App {
-    var sharedModelContainer: ModelContainer = {
-        let schema = Schema([
-            Item.self,
-        ])
-        let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
-
-        do {
-            return try ModelContainer(for: schema, configurations: [modelConfiguration])
-        } catch {
-            fatalError("Could not create ModelContainer: \(error)")
-        }
-    }()
-    
+    // The RAG container — holds the models the chat UI actually reads.
     let container: ModelContainer
 
     // `App.init()` must be synchronous, so we only build the container here.
@@ -96,7 +84,7 @@ struct CH4_AI_Banking_appApp: App {
                     await seedBcaDatabaseIfNeeded(context: container.mainContext)
                 }
         }
-        .modelContainer(sharedModelContainer)
+        .modelContainer(container)
     }
 
 }
