@@ -56,19 +56,19 @@ struct RAGSystemTests {
         let embedding = NLEmbedding.sentenceEmbedding(for: .english)
 
         for row in rows {
-            let uniqueID = row.name.lowercased()
-                .replacingOccurrences(of: " ", with: "_")
-                .components(separatedBy: CharacterSet.alphanumerics.inverted).joined()
             let chunk = buildContextualChunk(from: row)
             let vector = embedding?.vector(for: chunk) ?? []
 
             context.insert(
                 LocalDocument(
-                    id: uniqueID,
+                    id: UUID().uuidString, // FIX: Matches production ingestion layout exactly
                     chunk: chunk,
                     category: row.category,
                     source: "bca-products.json",
-                    embedding: vector
+                    embedding: vector,
+                    minIncome: 0.0, // Match your updated model parameters
+                    annualFee: 0.0,
+                    maxLimit: 0.0
                 )
             )
         }
@@ -165,16 +165,26 @@ struct RAGSystemTests {
         try seedRealCorpus(into: context)
 
         let query = "Which card gives me airport lounge access?"
-        let response = try await system.generateResponse(for: query)
+        let result = try await system.generateResponse(for: query)
 
-        #expect(!response.isEmpty)
+        #expect(!result.aiAnswer.isEmpty)
+        // The result also carries the documents the engines actually retrieved.
+        #expect(!result.citedDocuments.isEmpty)
+        // Echoes the input, and derives one product card per cited document.
+        #expect(result.userInput == query)
+        #expect(result.productCards.count == result.citedDocuments.count)
+        // Any generated quiz-chip questions must be well-formed (guided generation guarantees shape).
+        for followUp in result.suggestedFollowUps {
+            #expect(!followUp.question.isEmpty)
+            #expect(followUp.options.count <= 4)
+        }
 
         let messages = system.fetchRecentChatHistory(limit: 10)
         #expect(messages.count == 2)
         #expect(messages.first?.isUser == true)
         #expect(messages.first?.text == query)
         #expect(messages.last?.isUser == false)
-        #expect(messages.last?.text == response)
+        #expect(messages.last?.text == result.aiAnswer)
     }
 
     /// Best-effort *eval* (NON-deterministic wording): only asserts the hard prompt
@@ -189,8 +199,75 @@ struct RAGSystemTests {
         let (system, context) = try makeSystem()
         try seedRealCorpus(into: context)
 
-        let response = try await system.generateResponse(for: "Tell me about a basic everyday credit card.")
-        #expect(!response.isEmpty)
-        #expect(!response.contains("|"), "AI leaked a raw pipe delimiter the prompt forbids: \(response)")
+        let result = try await system.generateResponse(for: "Tell me about a basic everyday credit card.")
+        #expect(!result.aiAnswer.isEmpty)
+        #expect(!result.aiAnswer.contains("|"), "AI leaked a raw pipe delimiter the prompt forbids: \(result.aiAnswer)")
+    }
+
+    // MARK: - Salary pre-filter (deterministic)
+
+    /// `searchRelevantDocuments(userSalary:)` should drop products whose required
+    /// minimum income exceeds the user's salary (0 == no minimum, always eligible).
+    @Test func searchExcludesProductsAboveUserSalary() async throws {
+        let (system, context) = try makeSystem()
+
+        func doc(_ id: String, minIncome: Double) -> LocalDocument {
+            LocalDocument(
+                id: id, chunk: "A BCA card named \(id)", category: "test",
+                source: "test", embedding: [],
+                minIncome: minIncome, annualFee: 0, maxLimit: 0
+            )
+        }
+        context.insert(doc("premium", minIncome: 50_000_000)) // out of reach
+        context.insert(doc("everyday", minIncome: 0))         // always eligible
+        try context.save()
+
+        let results = await system.searchRelevantDocuments(for: "card", userSalary: 5_000_000, limit: 5)
+
+        #expect(results.allSatisfy { $0.minIncome == 0 || $0.minIncome <= 5_000_000 })
+        #expect(!results.contains { $0.id == "premium" })
+        #expect(results.contains { $0.id == "everyday" })
+    }
+
+    // MARK: - ProductCardInfo derivation (deterministic)
+
+    @Test func productCardParsesNameAndOneLinerFromChunk() {
+        let row = RawRow(
+            name: "BCA Visa Batman",
+            category: "Credit Card",
+            description: "Visa card with Batman-themed design.",
+            price: "IDR 125,000/year",
+            fees: "Late fee: 1%; Cash advance 4%",
+            limits: "Based on approval",
+            requirements: "Age 21-65",
+            benefitsAndFeatures: "Reward BCA, Visa benefits",
+            minApply: "IDR 3M/month"
+        )
+        let doc = LocalDocument(
+            id: "batman", chunk: buildContextualChunk(from: row), category: row.category,
+            source: "test", embedding: [], minIncome: 3_000_000, annualFee: 125_000, maxLimit: 0
+        )
+
+        let card = ProductCardInfo(document: doc)
+
+        #expect(card.id == "batman")
+        #expect(card.name == "BCA Visa Batman")
+        #expect(card.category == "Credit Card")
+        // The one-liner is the Description field, cleanly separated from the pipe-delimited chunk.
+        #expect(card.oneLiner == "Visa card with Batman-themed design.")
+        // Colon-containing values downstream (e.g. the fee text) must not corrupt earlier fields.
+        #expect(!card.oneLiner.contains("Late fee"))
+        #expect(card.annualFee == 125_000)
+    }
+
+    @Test func productCardFallsBackWhenChunkIsMalformed() {
+        let doc = LocalDocument(
+            id: "junk", chunk: "no delimiters here", category: "Loans",
+            source: "test", embedding: [], minIncome: 0, annualFee: 0, maxLimit: 0
+        )
+        let card = ProductCardInfo(document: doc)
+        #expect(card.name == "Unknown Product")
+        #expect(card.oneLiner.isEmpty)
+        #expect(card.category == "Loans")
     }
 }

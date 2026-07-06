@@ -25,18 +25,3 @@ struct RawRow: Codable {
         case minApply = "min_apply"
     }
 }
-
-/// Turns a single spreadsheet row dictionary into an explicit, contextually rich sentence block.
-func buildContextualChunk(from row: RawRow) -> String {
-    return """
-    Product Name: \(row.name) | \
-    Product Category: \(row.category) | \
-    Description: \(row.description) | \
-    Price & Annual Cost: \(row.price) | \
-    Fee Structure & Hidden Charges: \(row.fees) | \
-    Transaction, Credit, & Cash Withdrawal Limits: \(row.limits) | \
-    Requirements to Apply & Eligibility Criteria: \(row.requirements) | \
-    Product Benefits & Key Features: \(row.benefitsAndFeatures) | \
-    Minimum Income Requirement to Apply: \(row.minApply ?? "Not specified")
-    """
-}
