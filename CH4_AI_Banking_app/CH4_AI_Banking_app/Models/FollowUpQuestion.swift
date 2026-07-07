@@ -21,9 +21,9 @@ struct FollowUpQuestion: Equatable {
     var options: [String]
 }
 
-/// Container the model fills in — up to two follow-up questions per turn.
+/// Container the model fills in — the minimal set of intake questions per turn.
 @Generable
 struct FollowUpSuggestions: Equatable {
-    @Guide(description: "Up to two clarifying questions. Return an empty list if no clarification is needed.", .maximumCount(2))
+    @Guide(description: "Zero to three clarifying questions. Return an empty list if no clarification is needed.", .maximumCount(3))
     var questions: [FollowUpQuestion]
 }

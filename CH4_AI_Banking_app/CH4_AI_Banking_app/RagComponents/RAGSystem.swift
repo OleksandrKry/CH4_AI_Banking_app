@@ -19,87 +19,135 @@ class RAGSystem {
     
     // MARK: - Core Hybrid RAG Pipeline Orchestrator
         
-    /// Processes user input and returns a structured payload containing the clean AI answer and raw source metadata
-    func generateResponse(for userQuery: String, userSalary: Double? = nil) async throws -> RAGResult {
+    /// The "answer" step (loop phase): retrieve, generate the assistant reply, persist it, and
+    /// return the UI payload. The quiz now happens at *intake* (see beginIntake), not after the answer.
+    ///
+    /// - Parameters:
+    ///   - conversationID: scopes persisted messages + history to one conversation.
+    ///   - intakeContext: the user's quiz answers for this request, injected into the prompt.
+    func generateResponse(
+        for userQuery: String,
+        userSalary: Double? = nil,
+        conversationID: UUID? = nil,
+        intakeContext: String? = nil
+    ) async throws -> RAGResult {
         // 1. Commit incoming user query to persistent conversation history
-        let userMessage = ChatMessage(text: userQuery, isUser: true)
+        let userMessage = ChatMessage(text: userQuery, isUser: true, conversationID: conversationID)
         modelContext.insert(userMessage)
         try? modelContext.save()
-        
-        // 2. Perform On-Device Hybrid Search (Vector + Keyword BM25) with Pre-filtering
-        let relevantDocs = await searchRelevantDocuments(for: userQuery, userSalary: userSalary, limit: 2)
+
+        // 2. Load durable profile so recommendations are personalized + pre-qualified.
+        //    An explicit userSalary argument still wins (used by tests); otherwise use the profile's income.
+        let profile = fetchUserProfile()
+        let effectiveSalary = userSalary ?? (profile.map { $0.monthlyIncome > 0 ? $0.monthlyIncome : nil } ?? nil)
+        let profileBlock = profile?.promptSummary ?? "No profile information provided."
+
+        // Long-term memory: the most relevant past finished conversations (by similarity).
+        let memories = fetchRelevantMemories(for: userQuery, excluding: conversationID)
+        let memoryBlock = memories.isEmpty
+            ? ""
+            : "\nRelevant past conversations (memory):\n" + memories.map { "- \($0)" }.joined(separator: "\n") + "\n"
+
+        // 3. Perform On-Device Hybrid Search (Vector + Keyword BM25) with Pre-filtering
+        let relevantDocs = await searchRelevantDocuments(for: userQuery, userSalary: effectiveSalary, limit: 2)
         let spreadsheetContext = relevantDocs.map { $0.chunk }.joined(separator: "\n")
-        
-        // 3. Extract recent chat history context to give the model memory hooks
-        let conversationHistory = fetchRecentChatHistory(limit: 6)
+
+        // 4. Recent chat history, scoped to this conversation when provided
+        let conversationHistory = fetchRecentChatHistory(limit: 6, conversationID: conversationID)
         var chatTranscript = ""
         for message in conversationHistory {
             let speaker = message.isUser ? "Human" : "Assistant"
             chatTranscript += "\(speaker): \(message.text)\n"
         }
-        
-        // 4. Draft the master contextual prompt instruction
+
+        // 5. Draft the master contextual prompt instruction
+        let intakeBlock = intakeContext.map { "\nUser's quiz answers for this request:\n\($0)\n" } ?? ""
         let masterPrompt = """
-        You are a professional banking assistant for BCA. 
-        Analyze the structural Data Context and Chat History text blocks provided below to answer the user's question accurately.
-        
+        You are a professional banking assistant for BCA.
+        Analyze the User Profile, the user's quiz answers, structural Data Context, and Chat History to answer accurately.
+
         CRITICAL CONSTRAINTS:
-        - Deliver a natural, friendly sentence. No technical syntax or database references.
+        - Deliver a natural, friendly answer. No technical syntax or database references.
         - NEVER include raw data delimiters like pipes (|) in your response output.
+        - Tailor the recommendation to the User Profile and quiz answers when relevant.
         - If the context doesn't clarify the answer, politely decline to guess.
-        
+
+        User Profile:
+        \(profileBlock)
+        \(memoryBlock)\(intakeBlock)
         Data Context:
         \(spreadsheetContext)
-        
+
         Chat History:
         \(chatTranscript)
-        
+
         Current User Question: \(userQuery)
-        
+
         Answer:
         """
-        
-        // 5. Fire generation inference request directly to Apple Intelligence
+
+        // 6. Fire generation inference request directly to Apple Intelligence
         let session = LanguageModelSession()
         let response = try await session.respond(to: masterPrompt)
         let cleanAIResponse = response.content
-        
-        // 6. Save the AI's final cleaned statement back to storage memory
-        let aiMessage = ChatMessage(text: cleanAIResponse, isUser: false)
+
+        // 7. Save the AI's final cleaned statement back to storage memory,
+        //    tagging which products it cited so cards can be rebuilt on reload.
+        let aiMessage = ChatMessage(
+            text: cleanAIResponse,
+            isUser: false,
+            conversationID: conversationID,
+            citedDocumentIDs: relevantDocs.map(\.id)
+        )
         modelContext.insert(aiMessage)
         try? modelContext.save()
 
-        // 7. Derive UI-facing product cards + generate the clarifying "quiz chip" questions
+        // 8. Derive UI-facing product cards (the quiz lives at intake now, so no post-answer chips)
         let productCards = relevantDocs.map(ProductCardInfo.init(document:))
-        let followUps = await generateFollowUpQuestions(for: userQuery, context: spreadsheetContext)
 
-        // 8. Wrap the full layout payload the front end needs
         return RAGResult(
             userInput: userQuery,
             aiAnswer: cleanAIResponse,
             citedDocuments: relevantDocs,
             productCards: productCards,
-            suggestedFollowUps: followUps
+            suggestedFollowUps: []
         )
     }
 
-    // MARK: - Clarifying Question Generation (guided generation)
+    // MARK: - Intake: category classification + dynamic quiz generation
 
-    /// Produces the design's inline quiz chips: up to two short clarifying questions,
-    /// each with a few tappable options. Uses guided generation so the output is a
-    /// well-formed `[FollowUpQuestion]` with no manual parsing. Returns `[]` on failure.
-    private func generateFollowUpQuestions(for query: String, context: String) async -> [FollowUpQuestion] {
+    /// Classifies a query into a product category by reusing the retrieval we already run:
+    /// the majority category among the top hits. No CoreML, no extra model call. Returns ""
+    /// when nothing relevant is found (query too vague to classify).
+    func classifyCategory(for query: String) async -> String {
+        let profile = fetchUserProfile()
+        let salary = profile.map { $0.monthlyIncome > 0 ? $0.monthlyIncome : nil } ?? nil
+        let top = await searchRelevantDocuments(for: query, userSalary: salary, limit: 5)
+        guard !top.isEmpty else { return "" }
+
+        let counts = Dictionary(grouping: top, by: { $0.category }).mapValues(\.count)
+        return counts.max { $0.value < $1.value }?.key ?? top[0].category
+    }
+
+    /// Generates the minimal category-specific intake quiz (0–3 questions) via guided generation.
+    /// Seeded with what we already know (durable profile) so it doesn't re-ask occupation/income.
+    /// Returns `[]` when no clarification is needed or on failure — the caller then answers directly.
+    func generateIntakeQuiz(for query: String, category: String) async -> [FollowUpQuestion] {
+        let profileBlock = fetchUserProfile()?.promptSummary ?? "No profile information provided."
+        let categoryLabel = category.isEmpty ? "banking" : category
+
         let prompt = """
-        You are a BCA banking assistant helping a user narrow down products.
+        You are a BCA banking assistant preparing to recommend products in the "\(categoryLabel)" category.
         The user asked: "\(query)"
 
-        Using the product context below, propose up to two SHORT clarifying questions that
-        would help you recommend a better product (e.g. budget, intended use, eligibility).
-        Each question must offer two to four brief, tappable answer options.
-        If the question is already specific enough, return no questions.
+        You already know this about the user:
+        \(profileBlock)
 
-        Product Context:
-        \(context)
+        Generate the MINIMUM set of short clarifying questions (0 to 3) needed to recommend a good
+        "\(categoryLabel)" product. Only ask what actually changes the recommendation for THIS category
+        (e.g. intended use, amount, tenor, travel frequency). Do NOT re-ask occupation or income —
+        those are already known. Each question must offer two to four brief, tappable options.
+        If no clarification is needed, return no questions.
         """
 
         do {
@@ -107,11 +155,91 @@ class RAGSystem {
             let response = try await session.respond(to: prompt, generating: FollowUpSuggestions.self)
             return response.content.questions
         } catch {
-            print("⚠️ Follow-up question generation failed: \(error.localizedDescription)")
+            print("⚠️ Intake quiz generation failed: \(error.localizedDescription)")
             return []
         }
     }
     
+    // MARK: - Long-term memory (past conversations)
+
+    /// Returns the most relevant finished-conversation summaries for a query. Pulls a recent
+    /// pool of finished conversations, then ranks them by embedding similarity to the query
+    /// (falling back to most-recent if the embedding model is unavailable).
+    func fetchRelevantMemories(for query: String, excluding currentID: UUID?, limit: Int = 3, poolSize: Int = 20) -> [String] {
+        var descriptor = FetchDescriptor<Conversation>(
+            predicate: #Predicate { $0.phaseRaw == "finished" && $0.summary != "" },
+            sortBy: [SortDescriptor(\.finishedAt, order: .reverse)]
+        )
+        descriptor.fetchLimit = poolSize
+        var pool = (try? modelContext.fetch(descriptor)) ?? []
+        if let currentID { pool.removeAll { $0.id == currentID } }
+        guard !pool.isEmpty else { return [] }
+
+        guard let embedding = NLEmbedding.sentenceEmbedding(for: .english),
+              let queryVector = embedding.vector(for: query) else {
+            return Array(pool.prefix(limit)).map(\.summary)
+        }
+
+        let ranked = pool
+            .compactMap { convo -> (summary: String, score: Double)? in
+                guard let vector = embedding.vector(for: convo.summary) else { return nil }
+                return (convo.summary, VectorMath.cosineSimilarity(queryVector, vector))
+            }
+            .sorted { $0.score > $1.score }
+
+        return ranked.prefix(limit).map(\.summary)
+    }
+
+    /// Generates a one-line recap of a conversation, stored on the Conversation at Finish and
+    /// later surfaced as memory. Falls back to the opening user message if generation fails.
+    func summarizeConversation(id: UUID, category: String) async -> String {
+        let messages = fetchMessages(conversationID: id)
+        guard !messages.isEmpty else { return "" }
+
+        let transcript = messages
+            .map { "\($0.isUser ? "User" : "Assistant"): \($0.text)" }
+            .joined(separator: "\n")
+
+        let prompt = """
+        Summarize this banking assistant conversation in ONE short sentence (under 25 words) for future reference.
+        Include the product category, what the user wanted, and any product they settled on. No preamble.
+
+        Category: \(category.isEmpty ? "unknown" : category)
+        Conversation:
+        \(transcript)
+
+        Summary:
+        """
+
+        do {
+            let session = LanguageModelSession()
+            let response = try await session.respond(to: prompt)
+            return response.content.trimmingCharacters(in: .whitespacesAndNewlines)
+        } catch {
+            print("⚠️ Summary generation failed: \(error.localizedDescription)")
+            return messages.first(where: { $0.isUser })?.text ?? ""
+        }
+    }
+
+    /// All messages for a conversation, oldest first — used to rehydrate a reopened conversation.
+    func fetchMessages(conversationID: UUID) -> [ChatMessage] {
+        let descriptor = FetchDescriptor<ChatMessage>(
+            predicate: #Predicate { $0.conversationID == conversationID },
+            sortBy: [SortDescriptor(\.timestamp, order: .forward)]
+        )
+        return (try? modelContext.fetch(descriptor)) ?? []
+    }
+
+    /// Looks up documents by id (used to rebuild product cards for a reloaded reply).
+    func documents(withIDs ids: [String]) -> [LocalDocument] {
+        guard !ids.isEmpty else { return [] }
+        let idSet = Set(ids)
+        let all = fetchLocalDocuments().filter { idSet.contains($0.id) }
+        // Preserve the original cited order.
+        let byID = Dictionary(uniqueKeysWithValues: all.map { ($0.id, $0) })
+        return ids.compactMap { byID[$0] }
+    }
+
     // MARK: - Dual Hybrid Search Engine Integration
     
     func searchRelevantDocuments(for query: String, userSalary: Double? = nil, limit: Int = 3) async -> [LocalDocument] {
@@ -166,10 +294,28 @@ class RAGSystem {
         return (try? modelContext.fetch(descriptor)) ?? []
     }
 
-    func fetchRecentChatHistory(limit: Int) -> [ChatMessage] {
-        var descriptor = FetchDescriptor<ChatMessage>(sortBy: [SortDescriptor(\.timestamp, order: .reverse)])
+    func fetchRecentChatHistory(limit: Int, conversationID: UUID? = nil) -> [ChatMessage] {
+        var descriptor: FetchDescriptor<ChatMessage>
+        if let conversationID {
+            descriptor = FetchDescriptor<ChatMessage>(
+                predicate: #Predicate { $0.conversationID == conversationID },
+                sortBy: [SortDescriptor(\.timestamp, order: .reverse)]
+            )
+        } else {
+            descriptor = FetchDescriptor<ChatMessage>(sortBy: [SortDescriptor(\.timestamp, order: .reverse)])
+        }
         descriptor.fetchLimit = limit
         let recentDescending = (try? modelContext.fetch(descriptor)) ?? []
         return recentDescending.reversed()
+    }
+
+    /// The most recently updated completed onboarding profile, if any.
+    func fetchUserProfile() -> UserProfile? {
+        var descriptor = FetchDescriptor<UserProfile>(
+            predicate: #Predicate { $0.isComplete },
+            sortBy: [SortDescriptor(\.updatedAt, order: .reverse)]
+        )
+        descriptor.fetchLimit = 1
+        return (try? modelContext.fetch(descriptor))?.first
     }
 }

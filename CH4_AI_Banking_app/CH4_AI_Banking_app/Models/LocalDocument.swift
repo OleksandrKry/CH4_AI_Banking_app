@@ -15,13 +15,16 @@ final class LocalDocument {
     var category: String
     var source: String
     var embedding: [Double]
-    
-    // NEW: Explicit numerical columns for low-code database pre-filtering
+
+    // Explicit numerical columns for low-code database pre-filtering
     var minIncome: Double  // E.g., 3000000.0
     var annualFee: Double  // E.g., 125000.0
     var maxLimit: Double   // E.g., 3000000.0 (0.0 if approval-based)
-    
-    init(id: String, chunk: String, category: String, source: String, embedding: [Double], minIncome: Double, annualFee: Double, maxLimit: Double) {
+
+    // Provenance link to the official BCA product page (Section 11 "References").
+    var officialLink: String
+
+    init(id: String, chunk: String, category: String, source: String, embedding: [Double], minIncome: Double, annualFee: Double, maxLimit: Double, officialLink: String = "") {
         self.id = id
         self.chunk = chunk
         self.category = category
@@ -30,5 +33,6 @@ final class LocalDocument {
         self.minIncome = minIncome
         self.annualFee = annualFee
         self.maxLimit = maxLimit
+        self.officialLink = officialLink
     }
 }

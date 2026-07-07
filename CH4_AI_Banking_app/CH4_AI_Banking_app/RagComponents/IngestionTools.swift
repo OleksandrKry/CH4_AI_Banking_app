@@ -13,12 +13,12 @@ func buildContextualChunk(from row: RawRow) -> String {
     return """
     Product Name: \(row.name) | \
     Product Category: \(row.category) | \
-    Description: \(row.description) | \
-    Price & Annual Cost: \(row.price) | \
-    Fee Structure & Hidden Charges: \(row.fees) | \
-    Transaction, Credit, & Cash Withdrawal Limits: \(row.limits) | \
-    Requirements to Apply & Eligibility Criteria: \(row.requirements) | \
-    Product Benefits & Key Features: \(row.benefitsAndFeatures) | \
+    Description: \(row.description ?? "Not specified") | \
+    Price & Annual Cost: \(row.price ?? "Not specified") | \
+    Fee Structure & Hidden Charges: \(row.fees ?? "Not specified") | \
+    Transaction, Credit, & Cash Withdrawal Limits: \(row.limits ?? "Not specified") | \
+    Requirements to Apply & Eligibility Criteria: \(row.requirements ?? "Not specified") | \
+    Product Benefits & Key Features: \(row.benefitsAndFeatures ?? "Not specified") | \
     Minimum Income Requirement to Apply: \(row.minApply ?? "Not specified")
     """
 }
