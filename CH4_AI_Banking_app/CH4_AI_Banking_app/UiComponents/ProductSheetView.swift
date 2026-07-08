@@ -14,6 +14,9 @@ import SwiftUI
 
 struct ProductSheetView: View {
     let product: ProductCardInfo
+    /// When set, shows the "This works for me" action that finishes the
+    /// conversation with this product (the flow's continue → Finish branch).
+    var onChoose: (() -> Void)? = nil
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -42,6 +45,20 @@ struct ProductSheetView: View {
                 }
 
                 detailsSection
+
+                if let onChoose {
+                    Button(action: onChoose) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "checkmark.circle.fill")
+                            Text("This works for me — continue")
+                        }
+                        .font(.headline)
+                        .foregroundStyle(Theme.base)
+                        .frame(maxWidth: .infinity, minHeight: 52)
+                        .background(Capsule().fill(Theme.accent))
+                    }
+                    .buttonStyle(.plain)
+                }
 
                 referencesSection
 

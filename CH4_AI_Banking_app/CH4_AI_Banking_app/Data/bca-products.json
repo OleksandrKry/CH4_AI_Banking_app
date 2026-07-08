@@ -73,7 +73,7 @@
     },
     {
      "Name": "BCA Mastercard World",
-     "Category": "BCA Mastercard World",
+     "Category": "Travel Credit Card",
      "description": "World Mastercard with premium travel privileges.",
      "price": "IDR 1,000,000\/year",
      "fees": "Late fee: 1% (max IDR 100,000); Cash advance: 4% (min IDR 40,000); Overlimit: Free; Replacement card:Free (www.bca.co.id)",
@@ -133,7 +133,7 @@
     },
     {
      "Name": "BCA Singapore Airlines PPS Club Visa Infinite",
-     "Category": "BCA Singapore Airlines PPS Club Visa Infinite",
+     "Category": "Travel Credit Card",
      "description": "Premium card for PPS Club members.",
      "price": "Invitation only",
      "fees": "Premium fee schedule",
@@ -273,54 +273,6 @@
      "requirements": "Age 21–55, Indonesian citizen, stable income or existing BCA customer",
      "benefits & features": "Fast approval, bundled insurance, simple process",
      "min_apply": "15% DP (5–10% promo)",
-     "official_link": "https:\/\/www.bca.co.id\/en\/Individu\/produk\/Pinjaman"
-    },
-    {
-     "Name": "KPR Pembelian",
-     "Category": "Housing Loan",
-     "description": "Mortgage for buying house\/apartment\/shophouse.",
-     "price": "From 4.39% fixed p.a.",
-     "fees": "Provision 1%; Admin IDR 500k+; Appraisal 1.1–1.5M; Penalty 0.2%\/day",
-     "limits": "Up to 20 years tenure",
-     "requirements": "ID card, NPWP, salary slip, property docs",
-     "benefits & features": "Low down payment, fixed installments, developer partners",
-     "min_apply": "Varies by property",
-     "official_link": "https:\/\/www.bca.co.id\/en\/Individu\/produk\/Pinjaman"
-    },
-    {
-     "Name": "KPR Refinancing",
-     "Category": "Housing Loan",
-     "description": "Convert property into cash or reduce interest burden.",
-     "price": "From 5.39% fixed p.a.",
-     "fees": "Same as KPR + appraisal fee",
-     "limits": "Based on property value",
-     "requirements": "Active property ownership, income proof",
-     "benefits & features": "Cash-out option, top-up loan, flexible use",
-     "min_apply": "Property collateral",
-     "official_link": "https:\/\/www.bca.co.id\/en\/Individu\/produk\/Pinjaman"
-    },
-    {
-     "Name": "KPR Renovasi",
-     "Category": "Housing Loan",
-     "description": "Loan for home renovation or expansion.",
-     "price": "From 5.39% fixed p.a.",
-     "fees": "Same KPR fees",
-     "limits": "Based on property value",
-     "requirements": "Income proof + renovation plan (RAB)",
-     "benefits & features": "Renovation funding, top-up option, flexible use",
-     "min_apply": "Property collateral",
-     "official_link": "https:\/\/www.bca.co.id\/en\/Individu\/produk\/Pinjaman"
-    },
-    {
-     "Name": "KPR Take Over",
-     "Category": "Housing Loan",
-     "description": "Transfer mortgage from another bank.",
-     "price": "Competitive (varies)",
-     "fees": "Provision 0.25%; appraisal 1.1–1.5M",
-     "limits": "Up to 20 years",
-     "requirements": "Existing mortgage ≥ 2 years, good payment history",
-     "benefits & features": "Lower interest, top-up option, better terms",
-     "min_apply": "Existing mortgage",
      "official_link": "https:\/\/www.bca.co.id\/en\/Individu\/produk\/Pinjaman"
     },
     {

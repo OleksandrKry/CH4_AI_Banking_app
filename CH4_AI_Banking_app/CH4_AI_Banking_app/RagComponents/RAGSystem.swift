@@ -12,19 +12,32 @@ import FoundationModels
 
 class RAGSystem {
     private var modelContext: ModelContext
-    
+
+    /// One persistent FoundationModels session per conversation. The session owns
+    /// the transcript (native multi-turn memory) and the catalog tool — retrieval
+    /// runs only when the model decides the user needs new products.
+    private var chatSessions: [UUID: (session: LanguageModelSession, tool: ProductCatalogTool)] = [:]
+    private static let adHocSessionKey = UUID(uuidString: "00000000-0000-0000-0000-000000000000")!
+
+    /// Per-request salary override (tests pass it explicitly); the tool's search
+    /// closure reads it, falling back to the stored profile income.
+    private var salaryOverride: Double?
+
     init(modelContext: ModelContext) {
         self.modelContext = modelContext
     }
-    
-    // MARK: - Core Hybrid RAG Pipeline Orchestrator
-        
-    /// The "answer" step (loop phase): retrieve, generate the assistant reply, persist it, and
-    /// return the UI payload. The quiz now happens at *intake* (see beginIntake), not after the answer.
+
+    // MARK: - Core RAG Orchestrator (session + tool calling)
+
+    /// The "answer" step (loop phase): generate the assistant reply on the
+    /// conversation's persistent session, persist it, and return the UI payload.
+    /// Retrieval happens INSIDE generation via `ProductCatalogTool` — the model
+    /// calls it for new-product requests and answers follow-ups about
+    /// already-shown products from the transcript.
     ///
     /// - Parameters:
-    ///   - conversationID: scopes persisted messages + history to one conversation.
-    ///   - intakeContext: the user's quiz answers for this request, injected into the prompt.
+    ///   - conversationID: scopes persisted messages + the session to one conversation.
+    ///   - intakeContext: the user's quiz answers, appended to the first turn's prompt.
     func generateResponse(
         for userQuery: String,
         userSalary: Double? = nil,
@@ -36,71 +49,36 @@ class RAGSystem {
         modelContext.insert(userMessage)
         try? modelContext.save()
 
-        // 2. Load durable profile so recommendations are personalized + pre-qualified.
-        //    An explicit userSalary argument still wins (used by tests); otherwise use the profile's income.
-        let profile = fetchUserProfile()
-        let effectiveSalary = userSalary ?? (profile.map { $0.monthlyIncome > 0 ? $0.monthlyIncome : nil } ?? nil)
-        let profileBlock = profile?.promptSummary ?? "No profile information provided."
+        // 2. Per-conversation session: instructions (role, rules, profile, memory,
+        //    tool policy) were set once at session creation; the transcript carries
+        //    the multi-turn context natively.
+        salaryOverride = userSalary
+        let (session, tool) = chatSession(for: conversationID, firstQuery: userQuery)
+        await tool.beginTurn()
 
-        // Long-term memory: the most relevant past finished conversations (by similarity).
-        let memories = fetchRelevantMemories(for: userQuery, excluding: conversationID)
-        let memoryBlock = memories.isEmpty
-            ? ""
-            : "\nRelevant past conversations (memory):\n" + memories.map { "- \($0)" }.joined(separator: "\n") + "\n"
+        // 3. The prompt is just this turn: the query, plus quiz answers on turn one.
+        let prompt = intakeContext.map {
+            "\(userQuery)\n\nMy answers to your clarifying questions:\n\($0)"
+        } ?? userQuery
 
-        // 3. Perform On-Device Hybrid Search (Vector + Keyword BM25) with Pre-filtering
-        let relevantDocs = await searchRelevantDocuments(for: userQuery, userSalary: effectiveSalary, limit: 2)
-        let spreadsheetContext = relevantDocs.map { $0.chunk }.joined(separator: "\n")
-
-        // 4. Recent chat history, scoped to this conversation when provided
-        let conversationHistory = fetchRecentChatHistory(limit: 6, conversationID: conversationID)
-        var chatTranscript = ""
-        for message in conversationHistory {
-            let speaker = message.isUser ? "Human" : "Assistant"
-            chatTranscript += "\(speaker): \(message.text)\n"
+        // 4. Generate. maximumResponseTokens is a hard backstop against a runaway
+        //    response; the 3-4 sentence rule in the instructions shapes length.
+        let options = GenerationOptions(maximumResponseTokens: 150)
+        let cleanAIResponse: String
+        do {
+            cleanAIResponse = try await session.respond(to: prompt, options: options).content
+        } catch LanguageModelSession.GenerationError.exceededContextWindowSize {
+            // Documented recovery: fresh session seeded with the instructions and
+            // the latest exchange (condensed transcript), then retry once.
+            let condensed = condensedChatSession(for: conversationID, from: session, tool: tool)
+            cleanAIResponse = try await condensed.respond(to: prompt, options: options).content
         }
 
-        // 5. Draft the master contextual prompt instruction
-        let intakeBlock = intakeContext.map { "\nUser's quiz answers for this request:\n\($0)\n" } ?? ""
-        let masterPrompt = """
-        You are a professional banking assistant for BCA.
-        Analyze the User Profile, the user's quiz answers, structural Data Context, and Chat History to answer accurately.
+        // 5. Cards, citations, and confidence reflect what the model actually
+        //    consulted this turn (empty when it answered from the transcript).
+        let retrieved = await MainActor.run { tool.retrievedThisTurn }
+        let relevantDocs = documents(withIDs: retrieved.map(\.id))
 
-        CRITICAL CONSTRAINTS:
-        - Keep your answer to 3-4 sentences maximum. Be concise: answer only what was asked and do not volunteer unrelated products, caveats, or extra detail. Make sure that the sentences are understandable.
-        - Deliver a natural, friendly answer. No technical syntax or database references.
-        - NEVER include raw data delimiters like pipes (|) in your response output.
-        - Tailor the recommendation to the User Profile and quiz answers when relevant.
-        - Please response to user prompted language, whatever it is respectively.
-        - If the context doesn't clarify the answer, politely decline to guess.
-
-        User Profile:
-        \(profileBlock)
-        \(memoryBlock)\(intakeBlock)
-        Data Context:
-        \(spreadsheetContext)
-
-        Chat History:
-        \(chatTranscript)
-
-        Current User Question: \(userQuery)
-
-        Answer:
-        """
-
-        // 6. Fire generation inference request directly to Apple Intelligence.
-        //    The 3-4 sentence instruction shapes length; maximumResponseTokens is a
-        //    hard backstop against a runaway response (set with headroom to avoid
-        //    truncating mid-sentence).
-        let session = LanguageModelSession()
-        let response = try await session.respond(
-            to: masterPrompt,
-            options: GenerationOptions(maximumResponseTokens: 150)
-        )
-        let cleanAIResponse = response.content
-
-        // 7. Save the AI's final cleaned statement back to storage memory,
-        //    tagging which products it cited so cards can be rebuilt on reload.
         let aiMessage = ChatMessage(
             text: cleanAIResponse,
             isUser: false,
@@ -110,16 +88,105 @@ class RAGSystem {
         modelContext.insert(aiMessage)
         try? modelContext.save()
 
-        // 8. Derive UI-facing product cards (the quiz lives at intake now, so no post-answer chips)
-        let productCards = relevantDocs.map(ProductCardInfo.init(document:))
-
         return RAGResult(
             userInput: userQuery,
             aiAnswer: cleanAIResponse,
             citedDocuments: relevantDocs,
-            productCards: productCards,
-            suggestedFollowUps: []
+            productCards: relevantDocs.map(ProductCardInfo.init(document:)),
+            suggestedFollowUps: [],
+            retrievalConfidence: retrieved.map(\.confidence).max()
         )
+    }
+
+    // MARK: - Chat session lifecycle
+
+    /// Returns (creating and prewarming if needed) the persistent session for a
+    /// conversation. Instructions are built ONCE per session — profile, memories,
+    /// tool policy — instead of being re-tokenized on every turn.
+    private func chatSession(
+        for conversationID: UUID?,
+        firstQuery: String
+    ) -> (session: LanguageModelSession, tool: ProductCatalogTool) {
+        let key = conversationID ?? Self.adHocSessionKey
+        if let existing = chatSessions[key] { return existing }
+
+        let tool = ProductCatalogTool { [weak self] query in
+            guard let self else { return [] }
+            let salary = self.salaryOverride
+                ?? (self.fetchUserProfile().map { $0.monthlyIncome > 0 ? $0.monthlyIncome : nil } ?? nil)
+            return self.scoredSearchCore(for: query, userSalary: salary, limit: 2)
+                .filter { $0.confidence >= HybridRetriever.minimumConfidence }
+        }
+
+        let session = LanguageModelSession(
+            tools: [tool],
+            instructions: chatInstructions(for: conversationID, firstQuery: firstQuery)
+        )
+        session.prewarm()
+        chatSessions[key] = (session, tool)
+        return (session, tool)
+    }
+
+    /// Static per-conversation guidance: role + answer rules + tool policy +
+    /// profile + memory, plus a short recap when resuming a stored conversation
+    /// (a fresh session has no transcript for it).
+    private func chatInstructions(for conversationID: UUID?, firstQuery: String) -> String {
+        let profileBlock = fetchUserProfile()?.promptSummary ?? "No profile information provided."
+
+        let memories = fetchRelevantMemories(for: firstQuery, excluding: conversationID)
+        let memoryBlock = memories.isEmpty
+            ? ""
+            : "\nRelevant past conversations (memory):\n" + memories.map { "- \($0)" }.joined(separator: "\n") + "\n"
+
+        var recapBlock = ""
+        if let conversationID {
+            let recent = fetchRecentChatHistory(limit: 6, conversationID: conversationID)
+            if !recent.isEmpty {
+                recapBlock = "\nEarlier in this conversation:\n"
+                    + recent.map { "\($0.isUser ? "User" : "Assistant"): \($0.text)" }.joined(separator: "\n") + "\n"
+            }
+        }
+
+        return """
+        You are a professional banking assistant for BCA.
+
+        CRITICAL CONSTRAINTS:
+        - Keep your answer to 3-4 sentences maximum. Be concise: answer only what was asked and do not volunteer unrelated products, caveats, or extra detail. Make sure the sentences are understandable.
+        - Deliver a natural, friendly answer. No technical syntax, database references, or raw delimiters like pipes (|).
+        - Respond in the user's language, whatever it is.
+        - Recommend ONLY products returned by the searchProductCatalog tool in this conversation. Call the tool when the user asks for a recommendation or about new or different products. Do NOT call it for questions about products already discussed — answer those from the conversation.
+        - Tailor recommendations to the User Profile and the user's quiz answers when relevant.
+        - If no relevant product was found, politely decline to guess.
+
+        User Profile:
+        \(profileBlock)
+        \(memoryBlock)\(recapBlock)
+        """
+    }
+
+    /// Apple's documented context-window recovery: keep the first transcript entry
+    /// (instructions) and the last, drop the middle, and continue on a new session.
+    private func condensedChatSession(
+        for conversationID: UUID?,
+        from session: LanguageModelSession,
+        tool: ProductCatalogTool
+    ) -> LanguageModelSession {
+        let entries = [session.transcript.first, session.transcript.last].compactMap { $0 }
+        let fresh = LanguageModelSession(tools: [tool], transcript: Transcript(entries: entries))
+        chatSessions[conversationID ?? Self.adHocSessionKey] = (fresh, tool)
+        return fresh
+    }
+
+    /// Builds + prewarms the session ahead of time (called while the user fills
+    /// the intake quiz, so the KV cache is hot before the first answer).
+    func warmChatSession(for conversationID: UUID?, firstQuery: String) {
+        _ = chatSession(for: conversationID, firstQuery: firstQuery)
+    }
+
+    /// Drops a cached session (conversation finished, replaced, or reloaded —
+    /// a reloaded conversation gets a new session with a transcript recap).
+    func discardChatSession(for conversationID: UUID?) {
+        chatSessions[conversationID ?? Self.adHocSessionKey] = nil
     }
 
     // MARK: - Intake: category classification + dynamic quiz generation
@@ -137,12 +204,18 @@ class RAGSystem {
         return counts.max { $0.value < $1.value }?.key ?? top[0].category
     }
 
-    /// Generates the minimal category-specific intake quiz (0–3 questions) via guided generation.
-    /// Seeded with what we already know (durable profile) so it doesn't re-ask occupation/income.
-    /// Returns `[]` when no clarification is needed or on failure — the caller then answers directly.
+    /// Generates the category-specific intake quiz (3–6 questions, shape enforced by
+    /// constrained decoding) — the questions the user answers BEFORE the first
+    /// recommendation. Seeded with what we already know (durable profile) so it
+    /// doesn't re-ask occupation/income. Returns `[]` only on generation failure —
+    /// the caller then answers directly without a quiz.
     func generateIntakeQuiz(for query: String, category: String) async -> [FollowUpQuestion] {
         let profileBlock = fetchUserProfile()?.promptSummary ?? "No profile information provided."
         let categoryLabel = category.isEmpty ? "banking" : category
+
+        let focusLine = category.isEmpty
+            ? "The query is broad, so the FIRST question must ask which product category they need (e.g. loan, savings, card, investment, transfers)."
+            : "Only ask what actually changes the recommendation within \"\(categoryLabel)\" (e.g. intended use, amount, tenor, travel frequency)."
 
         let prompt = """
         You are a BCA banking assistant preparing to recommend products in the "\(categoryLabel)" category.
@@ -151,11 +224,11 @@ class RAGSystem {
         You already know this about the user:
         \(profileBlock)
 
-        Generate the MINIMUM set of short clarifying questions (0 to 3) needed to recommend a good
-        "\(categoryLabel)" product. Only ask what actually changes the recommendation for THIS category
-        (e.g. intended use, amount, tenor, travel frequency). Do NOT re-ask occupation or income —
-        those are already known. Each question must offer two to four brief, tappable options.
-        If no clarification is needed, return no questions.
+        Generate 3 to 6 short clarifying questions to gather the context needed for a precise
+        recommendation, ordered most important first. \(focusLine)
+        Do NOT re-ask occupation or income — those are already known. Each question offers two to
+        four brief, tappable options covering the most common answers; the user can also type
+        their own answer or skip a question, so options don't need to be exhaustive.
         """
 
         do {
@@ -250,49 +323,46 @@ class RAGSystem {
     // MARK: - Dual Hybrid Search Engine Integration
     
     func searchRelevantDocuments(for query: String, userSalary: Double? = nil, limit: Int = 3) async -> [LocalDocument] {
+        await scoredSearch(for: query, userSalary: userSalary, limit: limit).map(\.document)
+    }
+
+    /// Scored hybrid search — the retrieval entry point. Returns the top hits with
+    /// their cosine/BM25/RRF scores and calibrated confidence so callers can
+    /// threshold, log, and evaluate retrieval instead of trusting bare documents.
+    /// The ranking itself lives in `HybridRetriever` (shared with the eval harness).
+    func scoredSearch(for query: String, userSalary: Double? = nil, limit: Int = 3) async -> [RetrievalHit] {
+        scoredSearchCore(for: query, userSalary: userSalary, limit: limit)
+    }
+
+    /// Synchronous core of `scoredSearch` — also called by `ProductCatalogTool`
+    /// from inside a generation turn (on the main actor).
+    func scoredSearchCore(for query: String, userSalary: Double? = nil, limit: Int = 3) -> [RetrievalHit] {
         var documents = fetchLocalDocuments()
         guard !documents.isEmpty else { return [] }
-        
+
         // Deterministic Low-Code Pre-Filtering Stage
         if let salary = userSalary {
             documents = documents.filter { doc in
                 return doc.minIncome == 0.0 || doc.minIncome <= salary
             }
         }
-        
-        guard documents.count > limit else { return documents }
-        
-        let vectorEngine = VectorSearch(query: query, documents: documents)
-        let bm25Engine = BM25Search(query: query, documents: documents)
-        
-        guard let vectorSorted = vectorEngine.rankBySimilarity() else {
-            print("⚠️ Vector Generation Failed. Falling back exclusively to BM25 text metrics.")
-            return Array(bm25Engine.rankByKeyword().prefix(limit))
+
+        let hits = HybridRetriever.rank(
+            query: query,
+            documents: documents,
+            activeEmbeddingTag: ContextualEmbedder.shared.indexTag
+        )
+
+        #if DEBUG
+        for hit in hits.prefix(limit) {
+            let cosine = hit.vectorScore.map { String(format: "%.3f", $0) } ?? "  n/a"
+            print(String(format: "🔎 conf %.2f | cos %@ | bm25 %5.2f | %@",
+                         hit.confidence, cosine, hit.bm25Score,
+                         ProductCardInfo(document: hit.document).name))
         }
-        
-        let bm25Sorted = bm25Engine.rankByKeyword()
-        let rrfScores = reciprocalRankFusion(vectorRanked: vectorSorted, bm25Ranked: bm25Sorted)
-        
-        let finalRankedList = documents.sorted { (rrfScores[$0.id] ?? 0.0) > (rrfScores[$1.id] ?? 0.0) }
-        
-        return Array(finalRankedList.prefix(limit))
-    }
-    
-    private func reciprocalRankFusion(vectorRanked: [LocalDocument], bm25Ranked: [LocalDocument]) -> [String: Double] {
-        var rrfScores: [String: Double] = [:]
-        let k: Double = 60.0
-        
-        for (rank, doc) in vectorRanked.enumerated() {
-            let rankPlacement = Double(rank + 1)
-            rrfScores[doc.id, default: 0.0] += (1.0 / (k + rankPlacement)) * 0.4
-        }
-        
-        for (rank, doc) in bm25Ranked.enumerated() {
-            let rankPlacement = Double(rank + 1)
-            rrfScores[doc.id, default: 0.0] += (1.0 / (k + rankPlacement)) * 1.0
-        }
-        
-        return rrfScores
+        #endif
+
+        return Array(hits.prefix(limit))
     }
     
     // Note: `internal` (not `private`) so the test target can exercise them directly.
