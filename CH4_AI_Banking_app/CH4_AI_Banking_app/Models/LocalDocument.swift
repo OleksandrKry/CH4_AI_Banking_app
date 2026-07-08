@@ -24,7 +24,10 @@ final class LocalDocument {
     // Provenance link to the official BCA product page (Section 11 "References").
     var officialLink: String
 
-    init(id: String, chunk: String, category: String, source: String, embedding: [Double], minIncome: Double, annualFee: Double, maxLimit: Double, officialLink: String = "") {
+    // Which embedder produced `embedding` — used to re-seed if the model changes.
+    var embeddingModel: String
+
+    init(id: String, chunk: String, category: String, source: String, embedding: [Double], minIncome: Double, annualFee: Double, maxLimit: Double, officialLink: String = "", embeddingModel: String = "") {
         self.id = id
         self.chunk = chunk
         self.category = category
@@ -34,5 +37,6 @@ final class LocalDocument {
         self.annualFee = annualFee
         self.maxLimit = maxLimit
         self.officialLink = officialLink
+        self.embeddingModel = embeddingModel
     }
 }

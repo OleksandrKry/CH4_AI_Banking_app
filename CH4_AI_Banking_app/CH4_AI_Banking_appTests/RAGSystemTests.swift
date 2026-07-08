@@ -370,10 +370,11 @@ struct RAGSystemTests {
 
     // MARK: - Long-term memory (deterministic)
 
-    @Test func fetchRelevantMemoriesRanksMostSimilarSummaryFirst() throws {
+    @Test func fetchRelevantMemoriesRanksMostSimilarSummaryFirst() async throws {
+        await ContextualEmbedder.shared.prepare()
         try #require(
-            NLEmbedding.sentenceEmbedding(for: .english) != nil,
-            "English sentence embedding model unavailable on this host."
+            ContextualEmbedder.shared.isReady,
+            "Contextual embedding assets unavailable on this host — skipping."
         )
         let (system, context) = try makeSystem()
 

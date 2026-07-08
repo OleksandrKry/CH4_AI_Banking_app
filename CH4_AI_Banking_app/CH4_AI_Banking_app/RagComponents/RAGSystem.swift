@@ -67,9 +67,11 @@ class RAGSystem {
         Analyze the User Profile, the user's quiz answers, structural Data Context, and Chat History to answer accurately.
 
         CRITICAL CONSTRAINTS:
+        - Keep your answer to 3-4 sentences maximum. Be concise: answer only what was asked and do not volunteer unrelated products, caveats, or extra detail. Make sure that the sentences are understandable.
         - Deliver a natural, friendly answer. No technical syntax or database references.
         - NEVER include raw data delimiters like pipes (|) in your response output.
         - Tailor the recommendation to the User Profile and quiz answers when relevant.
+        - Please response to user prompted language, whatever it is respectively.
         - If the context doesn't clarify the answer, politely decline to guess.
 
         User Profile:
@@ -86,9 +88,15 @@ class RAGSystem {
         Answer:
         """
 
-        // 6. Fire generation inference request directly to Apple Intelligence
+        // 6. Fire generation inference request directly to Apple Intelligence.
+        //    The 3-4 sentence instruction shapes length; maximumResponseTokens is a
+        //    hard backstop against a runaway response (set with headroom to avoid
+        //    truncating mid-sentence).
         let session = LanguageModelSession()
-        let response = try await session.respond(to: masterPrompt)
+        let response = try await session.respond(
+            to: masterPrompt,
+            options: GenerationOptions(maximumResponseTokens: 150)
+        )
         let cleanAIResponse = response.content
 
         // 7. Save the AI's final cleaned statement back to storage memory,
@@ -175,14 +183,13 @@ class RAGSystem {
         if let currentID { pool.removeAll { $0.id == currentID } }
         guard !pool.isEmpty else { return [] }
 
-        guard let embedding = NLEmbedding.sentenceEmbedding(for: .english),
-              let queryVector = embedding.vector(for: query) else {
-            return Array(pool.prefix(limit)).map(\.summary)
+        guard let queryVector = ContextualEmbedder.shared.vector(for: query) else {
+            return Array(pool.prefix(limit)).map(\.summary) // embedder not ready → fall back to recency
         }
 
         let ranked = pool
             .compactMap { convo -> (summary: String, score: Double)? in
-                guard let vector = embedding.vector(for: convo.summary) else { return nil }
+                guard let vector = ContextualEmbedder.shared.vector(for: convo.summary) else { return nil }
                 return (convo.summary, VectorMath.cosineSimilarity(queryVector, vector))
             }
             .sorted { $0.score > $1.score }

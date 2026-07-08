@@ -45,14 +45,28 @@ struct CH4_AI_Banking_appApp: App {
 
     @MainActor
     private func seedBcaDatabaseIfNeeded(context: ModelContext) async {
+        // Load the embedder (contextual if available, else NLEmbedding fallback).
+        await ContextualEmbedder.shared.prepare()
+        guard ContextualEmbedder.shared.isReady else {
+            print("⚠️ No embedder available; skipping seeding this launch.")
+            return
+        }
+        let modelTag = ContextualEmbedder.shared.modelTag
+
         do {
-            let descriptor = FetchDescriptor<LocalDocument>()
-            let existingCount = try context.fetchCount(descriptor)
-            guard existingCount == 0 else { return }
+            let existing = try context.fetch(FetchDescriptor<LocalDocument>())
+            if let first = existing.first {
+                if first.embeddingModel == modelTag {
+                    return // already seeded with the current embedder
+                }
+                // Stored vectors came from a different embedder — re-seed in the new space.
+                print("♻️ Embedding model changed (\(first.embeddingModel) → \(modelTag)); re-seeding.")
+                existing.forEach { context.delete($0) }
+                try context.save()
+            }
 
-            print("📥 SwiftData empty. Starting contextual pipeline ingestion engine...")
+            print("📥 Starting contextual pipeline ingestion engine...")
 
-            // 1. Fetch your spreadsheet table JSON asset from the Xcode target bundle
             guard let fileURL = Bundle.main.url(forResource: "bca-products", withExtension: "json") else {
                 print("⚠️ Ingestion halted: 'bca-products.json' file not found.")
                 return
@@ -61,19 +75,13 @@ struct CH4_AI_Banking_appApp: App {
             let data = try Data(contentsOf: fileURL)
             let spreadsheetRows = try JSONDecoder().decode([RawRow].self, from: data)
 
-            guard let sentenceEmbedding = NLEmbedding.sentenceEmbedding(for: .english) else {
-                print("❌ Native Apple NLP models failed to load on-device.")
-                return
-            }
-
-            // 2. Loop through your rows
             for row in spreadsheetRows {
                 let descriptiveChunk = buildContextualChunk(from: row)
 
                 // Let the AI extract the math variables out of the raw text columns
                 let extractedMetrics = await extractNumericalMetadata(from: descriptiveChunk)
 
-                let nativeVector = sentenceEmbedding.vector(for: descriptiveChunk) ?? Array(repeating: 0.0, count: 512)
+                let nativeVector = ContextualEmbedder.shared.vector(for: descriptiveChunk) ?? []
 
                 let localDoc = LocalDocument(
                     id: UUID().uuidString,
@@ -84,14 +92,15 @@ struct CH4_AI_Banking_appApp: App {
                     minIncome: extractedMetrics.minIncome,    // Saved explicitly!
                     annualFee: extractedMetrics.annualFee,    // Saved explicitly!
                     maxLimit: extractedMetrics.maxLimit,      // Saved explicitly!
-                    officialLink: row.officialLink ?? ""      // Source page for the References row
+                    officialLink: row.officialLink ?? "",     // Source page for the References row
+                    embeddingModel: modelTag                  // So we re-seed if the embedder changes
                 )
 
                 context.insert(localDoc)
             }
 
             try context.save()
-            print("✅ Success! Ingested \(spreadsheetRows.count) highly descriptive card chunks into SwiftData.")
+            print("✅ Ingested \(spreadsheetRows.count) product chunks into SwiftData.")
         } catch {
             print("⚠️ Ingestion failed: \(error.localizedDescription)")
         }
