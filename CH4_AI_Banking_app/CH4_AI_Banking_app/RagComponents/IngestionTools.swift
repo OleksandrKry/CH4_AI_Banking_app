@@ -23,6 +23,20 @@ func buildContextualChunk(from row: RawRow) -> String {
     """
 }
 
+/// The distilled text the vector index embeds: what the product IS and WHO it's for.
+/// The full pipe-delimited chunk shares its label boilerplate ("Product Name:",
+/// "Fee Structure & Hidden Charges:", "Not specified", …) across all products, which
+/// mean-pools every vector toward one centroid and compresses exactly the cosine
+/// gaps that distinguish semantically similar banking products. BM25 and the LLM
+/// context still use the full chunk — only the embedding input is distilled.
+/// Bump `ContextualEmbedder.indexedTextVersion` when changing this scheme.
+func buildEmbeddingText(from row: RawRow) -> String {
+    [row.name, row.category, row.description, row.benefitsAndFeatures]
+        .compactMap { $0 }
+        .filter { !$0.isEmpty }
+        .joined(separator: ". ")
+}
+
 /// Uses Apple Intelligence to parse messy text fields into standardized numerical variables on-device
 func extractNumericalMetadata(from rawText: String) async -> (minIncome: Double, annualFee: Double, maxLimit: Double) {
     let extractionPrompt = """

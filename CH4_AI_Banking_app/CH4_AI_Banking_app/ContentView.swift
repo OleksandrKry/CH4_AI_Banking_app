@@ -66,11 +66,14 @@ private struct ChatScreen: View {
                                 .id(item.id)
                         }
 
-                        // Dynamic intake quiz (before the answer).
+                        // Dynamic intake quiz (before the answer): options, own
+                        // answer, or skip per question — typing answers directly.
                         if let intake = model.pendingIntake {
                             IntakeQuizView(
                                 intake: intake,
                                 onSelect: { model.selectIntakeOption(question: $0, option: $1) },
+                                onCustom: { model.setCustomIntakeAnswer(question: $0, text: $1) },
+                                onToggleSkip: { model.toggleSkipIntakeQuestion(question: $0) },
                                 onSubmit: { Task { await model.submitIntake() } }
                             )
                             .id(Self.intakeID)
@@ -92,16 +95,30 @@ private struct ChatScreen: View {
                 .onChange(of: model.pendingIntake != nil) { scrollToBottom(proxy) }
             }
 
-            InputBar(text: $model.draft, isResponding: model.isResponding || model.pendingIntake != nil) {
+            // Stays enabled during the quiz — typing there answers directly
+            // instead of filling in the questions (see ChatViewModel.send).
+            InputBar(
+                text: $model.draft,
+                isResponding: model.isResponding,
+                placeholder: model.pendingIntake != nil ? "Or answer directly…" : "Ask follow-up…"
+            ) {
                 Task { await model.sendDraft() }
             }
             .padding(.horizontal)
             .padding(.bottom, 8)
         }
         .sheet(item: $selectedProduct) { product in
-            ProductSheetView(product: product)
-                .presentationDetents([.medium, .large])
-                .presentationDragIndicator(.visible)
+            // "This works for me" inside the sheet closes the loop (flow: user
+            // checks the products, finds the right one, taps continue → Finish).
+            ProductSheetView(
+                product: product,
+                onChoose: model.canFinish ? {
+                    selectedProduct = nil
+                    Task { await model.finishConversation() }
+                } : nil
+            )
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
         }
         .sheet(isPresented: $showingHistory) {
             ConversationHistoryView { conversation in

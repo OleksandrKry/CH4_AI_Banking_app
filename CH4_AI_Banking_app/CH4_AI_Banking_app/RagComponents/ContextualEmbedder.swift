@@ -35,6 +35,15 @@ final class ContextualEmbedder: @unchecked Sendable {
         return "none"
     }
 
+    /// Version of the *text* the index embeds (see `buildEmbeddingText`). Bump it
+    /// whenever the embedded text scheme changes so existing stores re-seed even
+    /// though the model itself didn't change.
+    static let indexedTextVersion = "etext2"
+
+    /// Tag stored on every seeded document. Query-time vectors are only comparable
+    /// with stored vectors carrying this exact tag (same model AND text scheme).
+    var indexTag: String { "\(modelTag)+\(Self.indexedTextVersion)" }
+
     /// Attempts to load the contextual model (downloading assets if possible). If that
     /// fails, the fallback embedder is used. Safe to call repeatedly.
     func prepare() async {
@@ -72,20 +81,31 @@ final class ContextualEmbedder: @unchecked Sendable {
     func vector(for text: String) -> [Double]? {
         guard !text.isEmpty else { return nil }
 
-        if let contextual,
-           let result = try? contextual.embeddingResult(for: text, language: .english) {
-            var sum = [Double](repeating: 0, count: contextual.dimension)
-            var tokenCount = 0
-            result.enumerateTokenVectors(in: text.startIndex..<text.endIndex) { tokenVector, _ in
-                for index in 0..<min(tokenVector.count, sum.count) {
-                    sum[index] += tokenVector[index]
-                }
-                tokenCount += 1
-                return true
-            }
-            if tokenCount > 0 { return sum.map { $0 / Double(tokenCount) } } // mean pooling
+        if let contextual, let pooled = Self.meanPooledVector(for: text, using: contextual) {
+            return pooled
         }
 
         return fallback?.vector(for: text)
+    }
+
+    /// Mean-pools the subword token vectors into one sentence vector — the pooling
+    /// Apple documents for whole-text representations of contextual embeddings.
+    /// `language` stays nil so the model auto-detects: the script-level model covers
+    /// every Latin-script language, so Indonesian queries embed meaningfully too.
+    static func meanPooledVector(for text: String, using model: NLContextualEmbedding) -> [Double]? {
+        guard let result = try? model.embeddingResult(for: text, language: nil) else { return nil }
+
+        var sum = [Double](repeating: 0, count: model.dimension)
+        var tokenCount = 0
+        result.enumerateTokenVectors(in: text.startIndex..<text.endIndex) { tokenVector, _ in
+            for index in 0..<min(tokenVector.count, sum.count) {
+                sum[index] += tokenVector[index]
+            }
+            tokenCount += 1
+            return true
+        }
+
+        guard tokenCount > 0 else { return nil }
+        return sum.map { $0 / Double(tokenCount) } // mean pooling
     }
 }

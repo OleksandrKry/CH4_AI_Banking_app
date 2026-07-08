@@ -3,7 +3,9 @@
 //  CH4_AI_Banking_app
 //
 //  Drives the chat screen through the conversation state machine:
-//    intake (classify → dynamic quiz) → loop (answer directly) → finished (user tap).
+//    intake (classify → 3–6-question quiz with options / own answer / skip;
+//    typing instead of finishing the quiz answers directly)
+//    → loop (answer directly, no quiz) → finished (user tap).
 //  A new query after "finished" starts a fresh Conversation back in intake.
 //  Uses Observation (no Combine).
 //
@@ -27,19 +29,35 @@ enum TranscriptItem: Identifiable {
     }
 }
 
-/// A dynamic intake quiz awaiting the user's answers.
+/// A dynamic intake quiz awaiting the user's answers. Each question can be
+/// answered with a provided option, with the user's own typed text, or skipped.
 struct PendingIntake {
     let query: String
     let category: String
     let questions: [FollowUpQuestion]
-    var answers: [String: String] = [:]   // question -> selected option
+    var answers: [String: String] = [:]   // question -> selected option / custom text
+    var skipped: Set<String> = []         // questions the user chose not to answer
 
-    var allAnswered: Bool { questions.allSatisfy { answers[$0.question] != nil } }
+    /// Every question is either answered or deliberately skipped.
+    var allResolved: Bool {
+        questions.allSatisfy { answers[$0.question] != nil || skipped.contains($0.question) }
+    }
 
-    /// Compiled answers injected into the answer prompt.
+    var answeredCount: Int { questions.filter { answers[$0.question] != nil }.count }
+
+    /// True when the stored answer is the user's own text rather than an option.
+    func isCustomAnswer(for key: String) -> Bool {
+        guard let answer = answers[key],
+              let question = questions.first(where: { $0.question == key }) else { return false }
+        return !question.options.contains(answer)
+    }
+
+    /// Compiled answers injected into the answer prompt (skipped questions omitted).
     func summary() -> String {
         questions.compactMap { question in
-            answers[question.question].map { "- \(question.question): \($0)" }
+            answers[question.question].map {
+                "- \(question.question): \($0.trimmingCharacters(in: .whitespacesAndNewlines))"
+            }
         }.joined(separator: "\n")
     }
 }
@@ -75,7 +93,16 @@ final class ChatViewModel {
 
     func send(_ text: String) async {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, !isResponding, pendingIntake == nil else { return }
+        guard !trimmed.isEmpty, !isResponding else { return }
+
+        // Typing while the quiz is on screen means "answer directly": dismiss the
+        // quiz and fold the message plus any answers so far into the context,
+        // instead of silently dropping the message (matches the input's hint).
+        if pendingIntake != nil {
+            transcript.append(.user(id: UUID(), text: trimmed))
+            await answerBypassingIntake(with: trimmed)
+            return
+        }
 
         // Start a fresh conversation only when none is active (Finish clears the active one).
         if activeConversation == nil {
@@ -92,8 +119,37 @@ final class ChatViewModel {
 
     // MARK: - Intake quiz interaction
 
+    /// Tapping an option selects it (tapping the selected one deselects).
     func selectIntakeOption(question: String, option: String) {
-        pendingIntake?.answers[question] = option
+        if pendingIntake?.answers[question] == option {
+            pendingIntake?.answers[question] = nil
+        } else {
+            pendingIntake?.answers[question] = option
+            pendingIntake?.skipped.remove(question)
+        }
+    }
+
+    /// Free-text "own version" of an answer; blank text clears a custom answer
+    /// (but never a chip selection, which the field can't represent).
+    func setCustomIntakeAnswer(question: String, text: String) {
+        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if pendingIntake?.isCustomAnswer(for: question) == true {
+                pendingIntake?.answers[question] = nil
+            }
+        } else {
+            pendingIntake?.answers[question] = text
+            pendingIntake?.skipped.remove(question)
+        }
+    }
+
+    /// Marks a question as deliberately unanswered (tap again to restore it).
+    func toggleSkipIntakeQuestion(question: String) {
+        if pendingIntake?.skipped.contains(question) == true {
+            pendingIntake?.skipped.remove(question)
+        } else {
+            pendingIntake?.skipped.insert(question)
+            pendingIntake?.answers[question] = nil
+        }
     }
 
     /// Submits the intake quiz: persists the answers as slots, then answers the original query.
@@ -105,6 +161,20 @@ final class ChatViewModel {
         let summary = intake.summary()
         pendingIntake = nil
         await answer(for: intake.query, intakeContext: summary.isEmpty ? nil : summary)
+    }
+
+    /// The user typed instead of finishing the quiz: answer the ORIGINAL query,
+    /// carrying whatever they did answer plus their message as extra context.
+    private func answerBypassingIntake(with text: String) async {
+        guard let intake = pendingIntake else { return }
+        pendingIntake = nil
+
+        activeConversation?.slots = intake.answers
+        try? modelContext.save()
+
+        var context = intake.summary()
+        context += (context.isEmpty ? "" : "\n") + "- In their own words: \(text)"
+        await answer(for: intake.query, intakeContext: context)
     }
 
     // MARK: - Finishing
@@ -123,6 +193,7 @@ final class ChatViewModel {
         try? modelContext.save()
 
         phase = .finished
+        rag.discardChatSession(for: conversation.id) // session done with this topic
         activeConversation = nil // next send() starts a new conversation
         transcript.append(.notice(id: UUID(), text: "Conversation finished. Ask something new to start again."))
     }
@@ -131,6 +202,7 @@ final class ChatViewModel {
 
     /// Clears the screen for a brand-new conversation (also used by the "New chat" button).
     func newConversation() {
+        rag.discardChatSession(for: activeConversation?.id)
         activeConversation = nil
         pendingIntake = nil
         phase = .intake
@@ -138,8 +210,10 @@ final class ChatViewModel {
     }
 
     /// Reopens a stored conversation, rebuilding the transcript (and its product cards).
-    /// Sending a new message resumes it (see `send`).
+    /// Sending a new message resumes it (see `send`) on a fresh session that gets
+    /// a recap of the stored messages in its instructions.
     func loadConversation(_ conversation: Conversation) {
+        rag.discardChatSession(for: activeConversation?.id)
         activeConversation = conversation
         pendingIntake = nil
         phase = conversation.phase
@@ -193,6 +267,9 @@ final class ChatViewModel {
             await answer(for: query, intakeContext: nil)
         } else {
             pendingIntake = PendingIntake(query: query, category: category, questions: quiz)
+            // Build + prewarm the conversation's session while the user fills the
+            // quiz, so the first answer starts from a hot KV cache.
+            rag.warmChatSession(for: conversation.id, firstQuery: query)
         }
     }
 
