@@ -6,6 +6,9 @@
 //  and expands in place (iOS-native detents + grabber). Stays flat (surface-1),
 //  not glowing, so long text stays readable.
 //
+//  Shows the real product strings (price, fees, limits, requirements) so nothing
+//  reads "—" and fees are always truthful — never a guessed "Free".
+//
 
 import SwiftUI
 
@@ -38,11 +41,9 @@ struct ProductSheetView: View {
                         .foregroundStyle(Theme.textSecondary)
                 }
 
-                HStack(spacing: 12) {
-                    StatCell(label: "MIN INCOME", value: Self.money(product.minIncome))
-                    StatCell(label: "ANNUAL FEE", value: product.annualFee <= 0 ? "Free" : Self.money(product.annualFee))
-                    StatCell(label: "MAX LIMIT", value: Self.money(product.maxLimit))
-                }
+                detailsSection
+
+                referencesSection
 
                 Spacer(minLength: 8)
             }
@@ -52,40 +53,80 @@ struct ProductSheetView: View {
         .background(Theme.surface1.ignoresSafeArea())
     }
 
-    /// Compact IDR formatting: 3,000,000 -> "IDR 3M"; 0 -> "—".
-    private static func money(_ value: Double) -> String {
-        guard value > 0 else { return "—" }
-        if value >= 1_000_000 {
-            let millions = value / 1_000_000
-            let text = millions.truncatingRemainder(dividingBy: 1) == 0
-                ? String(format: "%.0f", millions)
-                : String(format: "%.1f", millions)
-            return "IDR \(text)M"
+    /// The real key facts, straight from the source data. Only rows that actually
+    /// have a value are shown, so there are no empty "—" placeholders.
+    private var detailsSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            DetailRow(label: "Price / Rate", value: product.price)
+            DetailRow(label: "Fees", value: product.fees)
+            DetailRow(label: "Limits", value: product.limits)
+            DetailRow(label: "Minimum to Apply", value: product.minApplyText)
+            DetailRow(label: "Requirements", value: product.requirements)
         }
-        return "IDR \(Int(value))"
+    }
+
+    /// Section 11: a labeled external link ("web page to dive deeper"), never a bare URL.
+    @ViewBuilder
+    private var referencesSection: some View {
+        if let url = URL(string: product.officialLink), !product.officialLink.isEmpty {
+            VStack(alignment: .leading, spacing: 12) {
+                Rectangle().fill(Theme.hairline).frame(height: 1)
+
+                Text("REFERENCES")
+                    .font(.caption).fontWeight(.semibold)
+                    .tracking(0.5)
+                    .foregroundStyle(Theme.accent)
+
+                Link(destination: url) {
+                    HStack(spacing: 12) {
+                        Image(systemName: "arrow.up.right")
+                            .font(.footnote)
+                            .foregroundStyle(Theme.textSecondary)
+                            .frame(width: 36, height: 36)
+                            .background(Circle().fill(Theme.hairline))
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("\(product.name) — official page")
+                                .font(.subheadline).fontWeight(.medium)
+                                .foregroundStyle(Theme.textPrimary)
+                            Text(url.host ?? product.officialLink)
+                                .font(.footnote)
+                                .foregroundStyle(Theme.textTertiary)
+                                .lineLimit(1)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                }
+                .buttonStyle(.plain)
+            }
+        }
     }
 }
 
-/// One labeled statistic cell used inside the sheet.
-struct StatCell: View {
+/// One labeled detail row that wraps its (possibly long) string value. Renders
+/// nothing when the value is empty, so missing fields simply don't appear.
+struct DetailRow: View {
     let label: String
     let value: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(label)
-                .font(.caption).fontWeight(.semibold)
-                .foregroundStyle(Theme.textTertiary)
-            Text(value)
-                .font(.headline)
-                .foregroundStyle(Theme.textPrimary)
+        if !value.isEmpty {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(label.uppercased())
+                    .font(.caption).fontWeight(.semibold)
+                    .tracking(0.5)
+                    .foregroundStyle(Theme.textTertiary)
+                Text(value)
+                    .font(.subheadline)
+                    .foregroundStyle(Theme.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(12)
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(Theme.hairline)
+            )
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(12)
-        .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Theme.hairline)
-        )
     }
 }
 
@@ -93,10 +134,20 @@ struct StatCell: View {
     ProductSheetView(
         product: ProductCardInfo(
             document: LocalDocument(
-                id: "flex",
-                chunk: "Product Name: Personal Loan Flex | Description: A fixed-rate loan for planned purchases.",
-                category: "Car Loans", source: "preview", embedding: [],
-                minIncome: 3_000_000, annualFee: 0, maxLimit: 60_000_000
+                id: "takeover",
+                chunk: """
+                Product Name: KPR BCA Take Over | Product Category: Housing Loan | \
+                Description: Transfer existing mortgage from another bank with the option to add extra credit. | \
+                Price & Annual Cost: Competitive interest rate options. | \
+                Fee Structure & Hidden Charges: Provision fee: 0.25%; Admin fee: Free; Appraisal fee: IDR 1.1M-1.5M; Penalty: 0.2%/day. | \
+                Transaction, Credit, & Cash Withdrawal Limits: Loan tenure up to 20 years, limit IDR 1B to 10B. | \
+                Requirements to Apply & Eligibility Criteria: Existing KPR active for at least 2 years, clean payment record for 12 months. | \
+                Product Benefits & Key Features: Competitive interest rates, flexible remaining tenor, option to top up loan. | \
+                Minimum Income Requirement to Apply: Existing KPR active for 2 years
+                """,
+                category: "Housing Loan", source: "preview", embedding: [],
+                minIncome: 0, annualFee: 0, maxLimit: 0,
+                officialLink: "https://www.bca.co.id/en/Individu/produk/Pinjaman"
             )
         )
     )

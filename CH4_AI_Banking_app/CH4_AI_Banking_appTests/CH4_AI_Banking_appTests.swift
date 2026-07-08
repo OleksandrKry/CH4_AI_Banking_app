@@ -89,10 +89,13 @@ struct BM25SearchTests {
 
 struct VectorSearchTests {
 
-    @Test func semanticallyRelevantDocumentRanksAboveIrrelevantOne() throws {
-        let embedding = try #require(
-            NLEmbedding.sentenceEmbedding(for: .english),
-            "English sentence embedding model unavailable on this host."
+    @Test func semanticallyRelevantDocumentRanksAboveIrrelevantOne() async throws {
+        // Docs and query must share the same embedding space, so embed both with the
+        // contextual model VectorSearch now uses.
+        await ContextualEmbedder.shared.prepare()
+        try #require(
+            ContextualEmbedder.shared.isReady,
+            "Contextual embedding assets unavailable on this host — skipping."
         )
 
         func doc(_ id: String, _ text: String) -> LocalDocument {
@@ -101,7 +104,7 @@ struct VectorSearchTests {
                 chunk: text,
                 category: "test",
                 source: "test",
-                embedding: embedding.vector(for: text) ?? [],
+                embedding: ContextualEmbedder.shared.vector(for: text) ?? [],
                 minIncome: 0, annualFee: 0, maxLimit: 0
             )
         }

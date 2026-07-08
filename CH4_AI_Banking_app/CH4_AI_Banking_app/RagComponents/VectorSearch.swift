@@ -18,10 +18,10 @@ class VectorSearch {
         self.documents = documents
     }
     
-    /// Generates the native 512-dimension sentence vector using the device OS kernel
+    /// Generates a mean-pooled contextual sentence vector for the text.
     private func getNativeEmbedding(for text: String) -> [Double]? {
-        guard let sentenceEmbedding = NLEmbedding.sentenceEmbedding(for: .english) else { return nil }
-        return sentenceEmbedding.vector(for: text)
+        // Transformer-based contextual embedding, loaded once at launch.
+        return ContextualEmbedder.shared.vector(for: text)
     }
 
     /// Ranks documents by cosine similarity to the query (a nearest-neighbour search).
