@@ -45,20 +45,21 @@ struct RAGSystemTests {
         return try JSONDecoder().decode([RawRow].self, from: data)
     }
 
-    /// Mirrors the app's ingestion: build a contextual chunk + native embedding
-    /// per product and insert it as a `LocalDocument`. Returns the seeded rows.
+    /// Mirrors the app's ingestion: full chunk for BM25/LLM context, distilled
+    /// text embedded via the same `ContextualEmbedder` the queries use (query and
+    /// document vectors MUST share one embedding space), tagged with the index tag.
     @discardableResult
     private func seedRealCorpus(into context: ModelContext) throws -> [RawRow] {
         let rows = try decodeProducts()
-        let embedding = NLEmbedding.sentenceEmbedding(for: .english)
+        let tag = ContextualEmbedder.shared.indexTag
 
         for row in rows {
             let chunk = buildContextualChunk(from: row)
-            let vector = embedding?.vector(for: chunk) ?? []
+            let vector = ContextualEmbedder.shared.vector(for: buildEmbeddingText(from: row)) ?? []
 
             context.insert(
                 LocalDocument(
-                    id: UUID().uuidString, // FIX: Matches production ingestion layout exactly
+                    id: row.name, // deterministic natural key, matches production seeding
                     chunk: chunk,
                     category: row.category,
                     source: "bca-products.json",
@@ -66,7 +67,8 @@ struct RAGSystemTests {
                     minIncome: 0.0, // Match your updated model parameters
                     annualFee: 0.0,
                     maxLimit: 0.0,
-                    officialLink: row.officialLink ?? ""
+                    officialLink: row.officialLink ?? "",
+                    embeddingModel: tag
                 )
             )
         }
@@ -316,8 +318,9 @@ struct RAGSystemTests {
         #expect(category.isEmpty)
     }
 
-    /// Model-gated: the intake quiz is guided generation, so we only assert its shape —
-    /// at most 3 questions, each non-empty with at most 4 options.
+    /// Model-gated: the intake quiz is guided generation. Constrained decoding
+    /// enforces the 3–6 question / 2–4 option shape; `[]` is the generation-failure
+    /// fallback (the caller then answers without a quiz).
     @Test func intakeQuizIsWellFormedForACategory() async throws {
         try #require(
             SystemLanguageModel.default.isAvailable,
@@ -328,10 +331,12 @@ struct RAGSystemTests {
         try seedRealCorpus(into: context)
 
         let quiz = await system.generateIntakeQuiz(for: "I need a home loan", category: "Housing Loan")
-        #expect(quiz.count <= 3)
+        if !quiz.isEmpty {
+            #expect((3...6).contains(quiz.count))
+        }
         for question in quiz {
             #expect(!question.question.isEmpty)
-            #expect(question.options.count <= 4)
+            #expect((2...4).contains(question.options.count))
         }
     }
 
@@ -370,12 +375,10 @@ struct RAGSystemTests {
 
     // MARK: - Long-term memory (deterministic)
 
-    @Test func fetchRelevantMemoriesRanksMostSimilarSummaryFirst() async throws {
-        await ContextualEmbedder.shared.prepare()
-        try #require(
-            ContextualEmbedder.shared.isReady,
-            "Contextual embedding assets unavailable on this host — skipping."
-        )
+    @Test(.enabled("Needs an on-device NL embedding model") {
+        await RetrievalEvaluator.embedderAvailable()
+    })
+    func fetchRelevantMemoriesRanksMostSimilarSummaryFirst() async throws {
         let (system, context) = try makeSystem()
 
         context.insert(Conversation(

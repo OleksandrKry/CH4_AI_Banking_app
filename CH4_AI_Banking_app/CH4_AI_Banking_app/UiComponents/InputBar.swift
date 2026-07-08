@@ -11,6 +11,7 @@ import SwiftUI
 struct InputBar: View {
     @Binding var text: String
     var isResponding: Bool
+    var placeholder: String = "Ask follow-up…"
     var onSend: () -> Void
 
     @State private var speechRecognizer = SpeechRecognizer()
@@ -76,7 +77,7 @@ struct InputBar: View {
                 }
                 .disabled(isResponding)
 
-                TextField("Ask follow-up…", text: $text, axis: .vertical)
+                TextField(placeholder, text: $text, axis: .vertical)
                     .textFieldStyle(.plain)
                     .foregroundStyle(Theme.textPrimary)
                     .tint(Theme.accent)

@@ -26,8 +26,16 @@ class BM25Search {
     
     // FIX: Removed 'private' keyword and renamed to reflect parameterless context tracking
     func rankByKeyword() -> [LocalDocument] {
+        let bm25Scores = scores()
+        guard !bm25Scores.isEmpty else { return documents }
+        return documents.sorted { (bm25Scores[$0.id] ?? 0.0) > (bm25Scores[$1.id] ?? 0.0) }
+    }
+
+    /// Raw BM25 score per document id. Empty when the query has no usable terms;
+    /// documents matching no query term score 0.
+    func scores() -> [String: Double] {
         let queryTerms = tokenize(query)
-        guard !queryTerms.isEmpty else { return documents }
+        guard !queryTerms.isEmpty else { return [:] }
         
         let totalDocs = Double(documents.count)
         var docTokens: [String: [String]] = [:]
@@ -68,7 +76,7 @@ class BM25Search {
             }
             scores[doc.id] = docScore
         }
-        
-        return documents.sorted { (scores[$0.id] ?? 0.0) > (scores[$1.id] ?? 0.0) }
+
+        return scores
     }
 }

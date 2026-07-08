@@ -51,16 +51,16 @@ struct CH4_AI_Banking_appApp: App {
             print("⚠️ No embedder available; skipping seeding this launch.")
             return
         }
-        let modelTag = ContextualEmbedder.shared.modelTag
+        let indexTag = ContextualEmbedder.shared.indexTag
 
         do {
             let existing = try context.fetch(FetchDescriptor<LocalDocument>())
             if let first = existing.first {
-                if first.embeddingModel == modelTag {
-                    return // already seeded with the current embedder
+                if first.embeddingModel == indexTag {
+                    return // already seeded with the current embedder + text scheme
                 }
-                // Stored vectors came from a different embedder — re-seed in the new space.
-                print("♻️ Embedding model changed (\(first.embeddingModel) → \(modelTag)); re-seeding.")
+                // Stored vectors came from a different embedding space — re-seed.
+                print("♻️ Embedding index changed (\(first.embeddingModel) → \(indexTag)); re-seeding.")
                 existing.forEach { context.delete($0) }
                 try context.save()
             }
@@ -81,10 +81,14 @@ struct CH4_AI_Banking_appApp: App {
                 // Let the AI extract the math variables out of the raw text columns
                 let extractedMetrics = await extractNumericalMetadata(from: descriptiveChunk)
 
-                let nativeVector = ContextualEmbedder.shared.vector(for: descriptiveChunk) ?? []
+                // The vector index embeds the distilled text; BM25 and the LLM
+                // context keep the full descriptive chunk (see buildEmbeddingText).
+                let nativeVector = ContextualEmbedder.shared.vector(for: buildEmbeddingText(from: row)) ?? []
 
                 let localDoc = LocalDocument(
-                    id: UUID().uuidString,
+                    // Deterministic natural key: idempotent re-seeds, and stored
+                    // citedDocumentIDs stay resolvable after a re-seed.
+                    id: row.name,
                     chunk: descriptiveChunk,
                     category: row.category,
                     source: "bca-products.json",
@@ -93,7 +97,7 @@ struct CH4_AI_Banking_appApp: App {
                     annualFee: extractedMetrics.annualFee,    // Saved explicitly!
                     maxLimit: extractedMetrics.maxLimit,      // Saved explicitly!
                     officialLink: row.officialLink ?? "",     // Source page for the References row
-                    embeddingModel: modelTag                  // So we re-seed if the embedder changes
+                    embeddingModel: indexTag                  // So we re-seed if the embedder or text scheme changes
                 )
 
                 context.insert(localDoc)

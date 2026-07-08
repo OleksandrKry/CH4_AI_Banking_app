@@ -14,4 +14,5 @@ struct RAGResult {
     let citedDocuments: [LocalDocument]         // The exact items pulled by the BM25 & Vector engines
     let productCards: [ProductCardInfo]         // UI-facing cards derived from citedDocuments (category + name + one-liner)
     let suggestedFollowUps: [FollowUpQuestion]  // "Questions to users" — the design's inline quiz chips
+    let retrievalConfidence: Double?            // Top hit's calibrated confidence (nil when nothing was retrieved)
 }

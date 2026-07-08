@@ -89,15 +89,13 @@ struct BM25SearchTests {
 
 struct VectorSearchTests {
 
-    @Test func semanticallyRelevantDocumentRanksAboveIrrelevantOne() async throws {
-        // Docs and query must share the same embedding space, so embed both with the
-        // contextual model VectorSearch now uses.
-        await ContextualEmbedder.shared.prepare()
-        try #require(
-            ContextualEmbedder.shared.isReady,
-            "Contextual embedding assets unavailable on this host — skipping."
-        )
-
+    /// Skips (not fails) on hosts without NL embedding assets, e.g. fresh simulators.
+    @Test(.enabled("Needs an on-device NL embedding model") {
+        await RetrievalEvaluator.embedderAvailable()
+    })
+    func semanticallyRelevantDocumentRanksAboveIrrelevantOne() async throws {
+        // Docs and query must share the same embedding space, so embed both with
+        // the contextual model VectorSearch now uses.
         func doc(_ id: String, _ text: String) -> LocalDocument {
             LocalDocument(
                 id: id,
@@ -117,5 +115,57 @@ struct VectorSearchTests {
         let engine = VectorSearch(query: "best rewards credit card", documents: docs)
         let ranked = try #require(engine.rankBySimilarity())
         #expect(ranked.first?.id == "card")
+    }
+}
+
+// MARK: - Intake quiz state (pure struct logic — options / own answer / skip)
+
+struct IntakeFlowTests {
+
+    private func makeIntake() -> PendingIntake {
+        PendingIntake(
+            query: "I want a loan",
+            category: "Housing Loan",
+            questions: [
+                FollowUpQuestion(question: "Purpose?", options: ["New home", "Renovation"]),
+                FollowUpQuestion(question: "Tenure?", options: ["≤10y", "10–20y"]),
+                FollowUpQuestion(question: "Budget?", options: ["<1B", ">1B"]),
+            ]
+        )
+    }
+
+    @Test func resolvedMeansAnsweredOrSkipped() {
+        var intake = makeIntake()
+        #expect(!intake.allResolved)
+
+        intake.answers["Purpose?"] = "Renovation"       // provided option
+        intake.answers["Tenure?"] = "about 15 years"    // user's own version
+        #expect(!intake.allResolved)                    // one question still open
+
+        intake.skipped.insert("Budget?")                // deliberately skipped
+        #expect(intake.allResolved)
+        #expect(intake.answeredCount == 2)
+    }
+
+    @Test func customAnswersAreDetectedAgainstOptions() {
+        var intake = makeIntake()
+        intake.answers["Purpose?"] = "Renovation"
+        intake.answers["Tenure?"] = "about 15 years"
+
+        #expect(!intake.isCustomAnswer(for: "Purpose?"))
+        #expect(intake.isCustomAnswer(for: "Tenure?"))
+        #expect(!intake.isCustomAnswer(for: "Budget?")) // unanswered → not custom
+    }
+
+    @Test func summaryIncludesAnswersAndOmitsSkipped() {
+        var intake = makeIntake()
+        intake.answers["Purpose?"] = "New home"
+        intake.answers["Tenure?"] = "about 15 years  "  // raw text is trimmed in the summary
+        intake.skipped.insert("Budget?")
+
+        let summary = intake.summary()
+        #expect(summary.contains("- Purpose?: New home"))
+        #expect(summary.contains("- Tenure?: about 15 years"))
+        #expect(!summary.contains("Budget?"))
     }
 }
