@@ -105,22 +105,26 @@ final class ChatViewModel {
 
         transcript.append(.user(id: UUID(), text: trimmed))
 
-        // Label the conversation once — AI intent classification costs ~1s
-        // on-device, so it runs OFF the critical path (the answer starts
-        // immediately); warming the session keeps the first answer's KV cache hot.
-        if let conversation = activeConversation, conversation.category.isEmpty {
+        // First message of a fresh conversation: ONE guided triage call decides
+        // the route — the product flow (intake questions → retrieval → cards)
+        // fires ONLY for transactional intent; informational and smalltalk
+        // queries get a direct conversational answer. The triage also labels
+        // the conversation's category. Session prewarms in parallel.
+        if let conversation = activeConversation, conversation.phase == .intake {
             rag.warmChatSession(for: conversation.id, firstQuery: trimmed)
-            Task { [weak self] in
-                guard let self else { return }
-                conversation.category = await self.rag.classifyIntentCategory(for: trimmed)
-                try? self.modelContext.save()
-            }
-        }
 
-        // First message of a fresh conversation: generate the 3–6 intake
-        // questions ONCE, then walk them one at a time (no model calls between).
-        if activeConversation?.phase == .intake {
-            await startIntakeFlow(for: trimmed)
+            isResponding = true
+            let triage = await rag.triageQuery(for: trimmed)
+            isResponding = false
+
+            conversation.category = triage.category
+            try? modelContext.save()
+
+            if triage.intent == .transactional {
+                await startIntakeFlow(for: trimmed)
+            } else {
+                await answer(for: trimmed)
+            }
             return
         }
 

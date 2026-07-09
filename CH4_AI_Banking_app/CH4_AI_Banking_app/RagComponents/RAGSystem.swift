@@ -262,38 +262,46 @@ class RAGSystem {
         }
     }
 
-    /// Classifies the user's intent into a decision-tree category via guided
-    /// generation — constrained decoding always yields a valid `IntentCategory`.
-    /// Falls back to the retrieval majority vote when the model is unavailable.
-    func classifyIntentCategory(for query: String) async -> String {
+    /// Routes the user's first message in ONE guided call: transactional vs
+    /// informational/smalltalk intent (gates the product flow) plus the product
+    /// category (labels the conversation). Constrained decoding always yields
+    /// valid cases. Degrades to (informational, retrieval-vote category) — the
+    /// safest failure: no quiz misfires, and the decision-tree instructions can
+    /// still qualify conversationally.
+    func triageQuery(for query: String) async -> (intent: QueryIntent, category: String) {
         guard SystemLanguageModel.default.isAvailable else {
-            return await classifyCategory(for: query)
+            return (.informational, await classifyCategory(for: query))
         }
 
         let clock = ContinuousClock()
         let start = clock.now
         let prompt = """
-        Classify this BCA banking request into the single best-fitting category.
-        Use "General" only when nothing else fits.
-        Request: "\(query)"
+        Triage this message a user just sent to BCA's banking assistant.
+        Message: "\(query)"
         """
 
         do {
             let session = LanguageModelSession()
-            let category = try await session.respond(
+            let triage = try await session.respond(
                 to: prompt,
-                generating: IntentCategory.self,
+                generating: QueryTriage.self,
                 options: GenerationOptions(sampling: .greedy)
             ).content
             #if DEBUG
-            print(String(format: "⏱ classify %.0fms → %@",
-                         start.duration(to: clock.now) / .milliseconds(1), category.rawValue))
+            print(String(format: "⏱ triage %.0fms → %@ / %@",
+                         start.duration(to: clock.now) / .milliseconds(1),
+                         triage.intent.rawValue, triage.category.rawValue))
             #endif
-            return category.rawValue
+            return (triage.intent, triage.category.rawValue)
         } catch {
-            print("⚠️ Intent classification failed (\(error)); falling back to retrieval vote.")
-            return await classifyCategory(for: query)
+            print("⚠️ Query triage failed (\(error)); defaulting to informational.")
+            return (.informational, await classifyCategory(for: query))
         }
+    }
+
+    /// Category-only convenience over `triageQuery` (kept for tests/labeling).
+    func classifyIntentCategory(for query: String) async -> String {
+        await triageQuery(for: query).category
     }
 
     // MARK: - Chat session lifecycle
@@ -368,6 +376,8 @@ class RAGSystem {
         - Follow the decision tree below: qualify with at most ONE short question per turn, and skip qualifying entirely when the user's need or profile already pins the branch.
         - Recommend ONLY products returned by the searchProductCatalog tool in this conversation. Call the tool once a tree leaf is clear, or when the user asks about new or different products. Do NOT call it when the user refers to products already shown ("that card", "the first one", "its fee") — answer those from the conversation.
         - Never repeat the tool's raw product listing verbatim — synthesize a natural sentence or two from it.
+        - If asked who you are or what you can do: you are BCA's banking assistant — the user can ask about banking products and services and you will answer and suggest options. Do not call the tool for this.
+        - You have no access to real-time data (time, weather, rates today). For those or other unrelated smalltalk, say so in one friendly sentence and offer banking help instead.
         - Tailor recommendations and qualifying questions to the User Profile (never re-ask what it already answers, e.g. income or occupation).
         - If no relevant product was found, politely decline to guess.
 

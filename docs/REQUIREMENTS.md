@@ -22,6 +22,8 @@ harness `scripts/retrieval-eval.sh` runs on macOS with no simulator.
 | R13 | Conversation intent is AI-classified into a decision-tree category (constrained decoding — always a valid category). | `RAGSystemTests.intentClassificationPicksATreeCategory` |
 | R14 | Answers: 3–4 sentences, no raw delimiters, user's language. | `RAGSystemTests.generatedAnswerObeysNoPipeDelimiterConstraint`; language rule checked manually |
 | R15 | Context window (4,096 tokens) is managed: instructions once per session, compact tool output, condensed-transcript recovery; per-turn stage timings + context estimate are recorded. | `RAGSystemTests.turnMetricsCaptureStageTimings`; `TurnMetrics` debug logs |
+| R16 | The product flow (intake questions → retrieval → cards) fires ONLY for transactional intent. Informational questions ("who are you?", "what can you do?") and smalltalk ("what's the time") get a direct conversational answer — the assistant introduces itself / declines real-time data and steers to banking. | `RAGSystemTests.triageRoutesIntentCorrectly`; triage gate in `ChatViewModel.send` |
+| R17 | Stopping voice dictation never shows an error banner — recognition cancellation is an expected outcome. | Cancellation filter in `SpeechRecognizer` (manual check) |
 
 Manual checks (not automatable cheaply): answer language mirroring, qualifying
 question UX feel, and the visual design of cards/sheets. Recalibrate confidence
