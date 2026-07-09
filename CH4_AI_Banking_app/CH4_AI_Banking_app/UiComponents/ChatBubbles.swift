@@ -32,8 +32,16 @@ struct UserBubble: View {
 }
 
 /// Assistant message — unboxed plain text on the base background, with an identity marker.
+/// Renders markdown (bold, italic, etc.) returned by the AI.
 struct AssistantText: View {
     let text: String
+
+    /// Parse the raw markdown string once; fall back to plain text if it fails.
+    private var attributed: AttributedString {
+        (try? AttributedString(markdown: text,
+                               options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
+        ?? AttributedString(text)
+    }
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
@@ -41,7 +49,7 @@ struct AssistantText: View {
                 .font(.footnote)
                 .foregroundStyle(Theme.accent)
                 .padding(.top, 2)
-            Text(text)
+            Text(attributed)
                 .font(.body)
                 .foregroundStyle(Theme.textPrimary)
                 .frame(maxWidth: .infinity, alignment: .leading)

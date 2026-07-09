@@ -20,6 +20,14 @@ struct InputBar: View {
         !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !isResponding
     }
 
+    /// Stops any active voice recording, then fires the send callback.
+    private func sendMessage() {
+        if speechRecognizer.isListening {
+            speechRecognizer.stopListening()
+        }
+        onSend()
+    }
+
     var body: some View {
         VStack(spacing: 6) {
             // Error banner for speech issues
@@ -82,9 +90,9 @@ struct InputBar: View {
                     .foregroundStyle(Theme.textPrimary)
                     .tint(Theme.accent)
                     .lineLimit(1...4)
-                    .onSubmit(onSend)
+                    .onSubmit(sendMessage)
 
-                Button(action: onSend) {
+                Button(action: sendMessage) {
                     Image(systemName: "arrow.up")
                         .font(.headline)
                         .foregroundStyle(Theme.base)
