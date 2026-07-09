@@ -15,4 +15,5 @@ struct RAGResult {
     let productCards: [ProductCardInfo]         // UI-facing cards derived from citedDocuments (category + name + one-liner)
     let suggestedFollowUps: [FollowUpQuestion]  // "Questions to users" — the design's inline quiz chips
     let retrievalConfidence: Double?            // Top hit's calibrated confidence (nil when nothing was retrieved)
+    var quizRequestedFor: String? = nil         // The model called askQualifyingQuestions with this need
 }

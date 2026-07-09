@@ -20,12 +20,15 @@ class RAGSystem {
     private final class ChatSessionBox {
         var session: LanguageModelSession
         let tool: ProductCatalogTool
+        let quizTool: IntakeQuizTool
         let baseChars: Int          // instructions + tool schema estimate
         var approxChars: Int
 
-        init(session: LanguageModelSession, tool: ProductCatalogTool, baseChars: Int) {
+        init(session: LanguageModelSession, tool: ProductCatalogTool,
+             quizTool: IntakeQuizTool, baseChars: Int) {
             self.session = session
             self.tool = tool
+            self.quizTool = quizTool
             self.baseChars = baseChars
             self.approxChars = baseChars
         }
@@ -148,6 +151,7 @@ class RAGSystem {
         let box = chatSession(for: conversationID, firstQuery: userQuery)
         metrics.sessionSetup = setupStart.duration(to: clock.now) // ~0 after turn one
         box.tool.beginTurn()
+        box.quizTool.beginTurn()
         turnRetrieval = .zero
 
         // 3. This turn's message, plus the intake answers on the first real turn.
@@ -185,11 +189,15 @@ class RAGSystem {
         modelContext.insert(aiMessage)
         try? modelContext.save()
 
-        // 6. When the model asked a decision-tree qualifying question instead of
-        //    recommending (no products retrieved), structure it via one-shot
+        // The model routes the product flow itself: a quiz request this turn
+        // (with no products retrieved) hands the questionnaire to the app.
+        let quizRequestedFor = relevantDocs.isEmpty ? box.quizTool.requestedNeed : nil
+
+        // 6. When the model asked a decision-tree qualifying question in TEXT
+        //    instead (no products, no questionnaire), structure it via one-shot
         //    guided generation so the UI renders tappable option rows.
         var followUps: [FollowUpQuestion] = []
-        if relevantDocs.isEmpty, cleanAIResponse.contains("?") {
+        if relevantDocs.isEmpty, quizRequestedFor == nil, cleanAIResponse.contains("?") {
             let structuringStart = clock.now
             let structurePrompt = """
             A banking assistant asked the user this qualifying question:
@@ -220,7 +228,8 @@ class RAGSystem {
             citedDocuments: relevantDocs,
             productCards: relevantDocs.map(ProductCardInfo.init(document:)),
             suggestedFollowUps: followUps,
-            retrievalConfidence: retrieved.map(\.confidence).max()
+            retrievalConfidence: retrieved.map(\.confidence).max(),
+            quizRequestedFor: quizRequestedFor
         )
     }
 
@@ -262,46 +271,39 @@ class RAGSystem {
         }
     }
 
-    /// Routes the user's first message in ONE guided call: transactional vs
-    /// informational/smalltalk intent (gates the product flow) plus the product
-    /// category (labels the conversation). Constrained decoding always yields
-    /// valid cases. Degrades to (informational, retrieval-vote category) — the
-    /// safest failure: no quiz misfires, and the decision-tree instructions can
-    /// still qualify conversationally.
-    func triageQuery(for query: String) async -> (intent: QueryIntent, category: String) {
+    /// Labels the conversation with a decision-tree category via guided
+    /// generation (constrained decoding always yields a valid case). Purely for
+    /// history/memory labeling — flow ROUTING is the session model's tool choice.
+    /// Falls back to the retrieval majority vote when the model is unavailable.
+    func classifyIntentCategory(for query: String) async -> String {
         guard SystemLanguageModel.default.isAvailable else {
-            return (.informational, await classifyCategory(for: query))
+            return await classifyCategory(for: query)
         }
 
         let clock = ContinuousClock()
         let start = clock.now
         let prompt = """
-        Triage this message a user just sent to BCA's banking assistant.
-        Message: "\(query)"
+        Classify this BCA banking request into the single best-fitting category.
+        Use "General" only when nothing else fits.
+        Request: "\(query)"
         """
 
         do {
             let session = LanguageModelSession()
-            let triage = try await session.respond(
+            let category = try await session.respond(
                 to: prompt,
-                generating: QueryTriage.self,
+                generating: IntentCategory.self,
                 options: GenerationOptions(sampling: .greedy)
             ).content
             #if DEBUG
-            print(String(format: "⏱ triage %.0fms → %@ / %@",
-                         start.duration(to: clock.now) / .milliseconds(1),
-                         triage.intent.rawValue, triage.category.rawValue))
+            print(String(format: "⏱ classify %.0fms → %@",
+                         start.duration(to: clock.now) / .milliseconds(1), category.rawValue))
             #endif
-            return (triage.intent, triage.category.rawValue)
+            return category.rawValue
         } catch {
-            print("⚠️ Query triage failed (\(error)); defaulting to informational.")
-            return (.informational, await classifyCategory(for: query))
+            print("⚠️ Category classification failed (\(error)); falling back to retrieval vote.")
+            return await classifyCategory(for: query)
         }
-    }
-
-    /// Category-only convenience over `triageQuery` (kept for tests/labeling).
-    func classifyIntentCategory(for query: String) async -> String {
-        await triageQuery(for: query).category
     }
 
     // MARK: - Chat session lifecycle
@@ -329,12 +331,14 @@ class RAGSystem {
             return HybridRetriever.cardworthyHits(hits)
         }
 
+        let quizTool = IntakeQuizTool()
         let instructions = chatInstructions(for: conversationID, firstQuery: firstQuery)
-        let session = LanguageModelSession(tools: [tool], instructions: instructions)
+        let session = LanguageModelSession(tools: [tool, quizTool], instructions: instructions)
         session.prewarm()
 
-        // ~600 chars covers the injected tool schema + framing overhead.
-        let box = ChatSessionBox(session: session, tool: tool, baseChars: instructions.count + 600)
+        // ~800 chars covers the injected tool schemas + framing overhead.
+        let box = ChatSessionBox(session: session, tool: tool, quizTool: quizTool,
+                                 baseChars: instructions.count + 800)
         chatSessions[key] = box
         #if DEBUG
         print("🧾 session instructions ≈ \(box.baseChars / 4) tokens")
@@ -369,17 +373,17 @@ class RAGSystem {
         return """
         You are a professional banking assistant for BCA.
 
-        CRITICAL CONSTRAINTS:
-        - Keep your answer to 3-4 sentences maximum. Be concise: answer only what was asked and do not volunteer unrelated products, caveats, or extra detail. Make sure the sentences are understandable.
-        - Deliver a natural, friendly answer. No technical syntax, database references, or raw delimiters like pipes (|).
-        - Respond in the user's language, whatever it is.
-        - Follow the decision tree below: qualify with at most ONE short question per turn, and skip qualifying entirely when the user's need or profile already pins the branch.
-        - Recommend ONLY products returned by the searchProductCatalog tool in this conversation. Call the tool once a tree leaf is clear, or when the user asks about new or different products. Do NOT call it when the user refers to products already shown ("that card", "the first one", "its fee") — answer those from the conversation.
-        - Never repeat the tool's raw product listing verbatim — synthesize a natural sentence or two from it.
-        - If asked who you are or what you can do: you are BCA's banking assistant — the user can ask about banking products and services and you will answer and suggest options. Do not call the tool for this.
-        - You have no access to real-time data (time, weather, rates today). For those or other unrelated smalltalk, say so in one friendly sentence and offer banking help instead.
-        - Tailor recommendations and qualifying questions to the User Profile (never re-ask what it already answers, e.g. income or occupation).
-        - If no relevant product was found, politely decline to guess.
+        EVERY TURN, pick exactly ONE move:
+        1. Greeting, chit-chat, or a question about you, the bank, or how something works → answer in text, NO tools. (Who are you? → BCA's banking assistant: ask about banking products and you get answers and suggestions. No real-time data like time or weather — say so briefly and offer banking help.)
+        2. The user wants a banking product or service but their need is still VAGUE (no use-case or feature named, preferences unknown) → call askQualifyingQuestions with their need.
+        3. The need is SPECIFIC (a feature, use-case, or product is named — e.g. "card with lounge access", "loan to renovate my house"), the questionnaire answers just arrived, or the user asks for new/different products → call searchProductCatalog and answer from its results.
+        4. The user refers to products already shown ("that card", "the first one", "its fee") → answer from the conversation, NO tools.
+
+        ANSWER RULES:
+        - 3-4 sentences maximum, friendly and natural, in the user's language; never output pipe (|) characters or technical syntax.
+        - Recommend ONLY products the searchProductCatalog tool returned in this conversation — never invent products, never repeat tool output verbatim.
+        - If the tool found nothing relevant, say so politely; do not guess.
+        - Use the User Profile below; never re-ask what it already answers (e.g. income, occupation).
 
         \(BankingDecisionTree.instructionsBlock)
 
@@ -393,7 +397,8 @@ class RAGSystem {
     /// (instructions) and the last, drop the middle, and continue on a new session.
     private func condensedChatSession(in box: ChatSessionBox) -> LanguageModelSession {
         let entries = [box.session.transcript.first, box.session.transcript.last].compactMap { $0 }
-        let fresh = LanguageModelSession(tools: [box.tool], transcript: Transcript(entries: entries))
+        let fresh = LanguageModelSession(tools: [box.tool, box.quizTool],
+                                         transcript: Transcript(entries: entries))
         box.session = fresh
         box.approxChars = box.baseChars + 800 // instructions + roughly one exchange
         return fresh

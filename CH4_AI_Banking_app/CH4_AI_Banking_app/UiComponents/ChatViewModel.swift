@@ -105,45 +105,38 @@ final class ChatViewModel {
 
         transcript.append(.user(id: UUID(), text: trimmed))
 
-        // First message of a fresh conversation: ONE guided triage call decides
-        // the route — the product flow (intake questions → retrieval → cards)
-        // fires ONLY for transactional intent; informational and smalltalk
-        // queries get a direct conversational answer. The triage also labels
-        // the conversation's category. Session prewarms in parallel.
-        if let conversation = activeConversation, conversation.phase == .intake {
+        // Label the conversation once (off the critical path — routing is the
+        // session model's job now); warm the session for a hot first answer.
+        if let conversation = activeConversation, conversation.category.isEmpty {
             rag.warmChatSession(for: conversation.id, firstQuery: trimmed)
-
-            isResponding = true
-            let triage = await rag.triageQuery(for: trimmed)
-            isResponding = false
-
-            conversation.category = triage.category
-            try? modelContext.save()
-
-            if triage.intent == .transactional {
-                await startIntakeFlow(for: trimmed)
-            } else {
-                await answer(for: trimmed)
+            Task { [weak self] in
+                guard let self else { return }
+                conversation.category = await self.rag.classifyIntentCategory(for: trimmed)
+                try? self.modelContext.save()
             }
-            return
         }
 
-        await answer(for: trimmed) // finished + new message = resume
+        // Every turn goes to the session; the MODEL routes it — direct answer
+        // for greetings/questions, the questionnaire tool for unqualified
+        // product needs, the catalog tool for qualified ones.
+        await answer(for: trimmed)
     }
 
-    // MARK: - Sequential intake flow
+    // MARK: - Sequential intake flow (started when the model calls the quiz tool)
 
-    private func startIntakeFlow(for query: String) async {
+    private func startIntakeFlow(originalQuery: String, need: String) async {
         isResponding = true
-        let questions = await rag.generateIntakeQuestions(for: query)
+        let questions = await rag.generateIntakeQuestions(for: need)
         isResponding = false
 
         guard let first = questions.first else {
-            await answer(for: query) // generation unavailable → answer directly
+            // Rare: the turn succeeded but question generation didn't.
+            transcript.append(.notice(id: UUID(),
+                text: "Couldn't prepare the questions — just tell me more in your own words."))
             return
         }
 
-        intakeFlow = IntakeFlow(originalQuery: query, questions: questions)
+        intakeFlow = IntakeFlow(originalQuery: originalQuery, questions: questions)
         transcript.append(.assistant(id: UUID(), answer: first.question, cards: [], question: first))
     }
 
@@ -284,6 +277,12 @@ final class ChatViewModel {
             conversation.phase = .loop
             phase = .loop
             try? modelContext.save()
+
+            // The model asked for the questionnaire → run it (questions are
+            // generated once here, then walked one at a time).
+            if let need = result.quizRequestedFor {
+                await startIntakeFlow(originalQuery: query, need: need)
+            }
         } catch {
             // Friendly, actionable text — never a raw framework error dump.
             transcript.append(

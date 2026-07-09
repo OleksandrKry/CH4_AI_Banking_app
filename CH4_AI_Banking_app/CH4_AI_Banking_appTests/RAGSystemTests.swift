@@ -375,27 +375,38 @@ struct RAGSystemTests {
                         atomically: true, encoding: .utf8)
     }
 
-    /// R16: the product flow is gated on TRANSACTIONAL intent — product-seeking
-    /// queries route to the quiz, identity/capability questions and smalltalk
-    /// route to a direct answer.
-    @Test(arguments: [
-        ("I need a credit card for travel", QueryIntent.transactional),
-        ("who are you and what can you help with?", QueryIntent.informational),
-        ("what's the time?", QueryIntent.smalltalk),
-    ])
-    func triageRoutesIntentCorrectly(query: String, expected: QueryIntent) async throws {
+    /// R16: routing is the session model's tool choice. Greetings and identity
+    /// questions must answer directly — no questionnaire, no product cards.
+    @Test(arguments: ["Hi", "how are you?", "who are you and what can you help with?"])
+    func greetingsAnswerDirectlyWithoutWorkflows(query: String) async throws {
         try #require(SystemLanguageModel.default.isAvailable,
                      "Apple Intelligence model unavailable on this host — skipping.")
-        let (system, _) = try makeSystem()
+        let (system, context) = try makeSystem()
+        try seedRealCorpus(into: context)
 
-        let triage = await system.triageQuery(for: query)
-        if expected == .transactional {
-            #expect(triage.intent == .transactional)
-        } else {
-            // informational vs smalltalk boundary is fuzzy; what matters is that
-            // neither ever triggers the product flow.
-            #expect(triage.intent != .transactional)
-        }
+        let result = try await system.generateResponse(for: query)
+        #expect(!result.aiAnswer.isEmpty)
+        #expect(result.quizRequestedFor == nil, "'\(query)' must not trigger the questionnaire.")
+        #expect(result.productCards.isEmpty, "'\(query)' must not surface product cards.")
+    }
+
+    /// R16: a product-seeking first message fires the product flow — either the
+    /// questionnaire (preferences unknown) or a direct qualified recommendation.
+    @Test func productQueryTriggersQuestionnaireOrRecommendation() async throws {
+        try #require(SystemLanguageModel.default.isAvailable,
+                     "Apple Intelligence model unavailable on this host — skipping.")
+        let (system, context) = try makeSystem()
+        try seedRealCorpus(into: context)
+
+        let result = try await system.generateResponse(for: "I want to find a credit card")
+        // Any product-directed engagement is correct: the questionnaire tool, a
+        // direct recommendation, or a qualifying question (which the UI renders
+        // as a tappable question card). A shrug is the only failure.
+        let engaged = result.quizRequestedFor != nil
+            || !result.productCards.isEmpty
+            || !result.suggestedFollowUps.isEmpty
+            || result.aiAnswer.contains("?")
+        #expect(engaged, "A transactional query must qualify (questionnaire/question) or recommend.")
     }
 
     /// R15: every turn reports its stage timings and context estimate.
