@@ -10,6 +10,9 @@ import SwiftUI
 
 struct ProductCardView: View {
     let product: ProductCardInfo
+    /// The top-confidence hit wears the "Recommended" treatment: accent border
+    /// + capsule badge (color never carries meaning alone — text does).
+    var isRecommended: Bool = false
     let onTap: () -> Void
 
     var body: some View {
@@ -51,9 +54,25 @@ struct ProductCardView: View {
                 .fill(Theme.surface1)
                 .overlay(
                     RoundedRectangle(cornerRadius: 20, style: .continuous)
-                        .stroke(Theme.hairline, lineWidth: 1)
+                        .stroke(isRecommended ? Theme.accent.opacity(0.7) : Theme.hairline,
+                                lineWidth: isRecommended ? 1.5 : 1)
                 )
         )
+        .overlay(alignment: .topTrailing) {
+            if isRecommended {
+                HStack(spacing: 4) {
+                    Image(systemName: "star.fill").font(.system(size: 8))
+                    Text("RECOMMENDED")
+                        .font(.caption2).fontWeight(.semibold)
+                        .tracking(0.5)
+                }
+                .foregroundStyle(Theme.base)
+                .padding(.horizontal, 10)
+                .frame(height: 20)
+                .background(Capsule().fill(Theme.accent))
+                .offset(x: -12, y: -8)
+            }
+        }
         .shadow(color: Theme.brandSurface.opacity(0.35), radius: 22, x: 0, y: 10)
         .contentShape(Rectangle())
         .onTapGesture(perform: onTap)

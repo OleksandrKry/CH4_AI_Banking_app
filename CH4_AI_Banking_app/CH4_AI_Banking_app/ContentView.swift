@@ -66,42 +66,17 @@ private struct ChatScreen: View {
                                 .id(item.id)
                         }
 
-                        // Dynamic intake quiz (before the answer): options, own
-                        // answer, or skip per question — typing answers directly.
-                        if let intake = model.pendingIntake {
-                            IntakeQuizView(
-                                intake: intake,
-                                onSelect: { model.selectIntakeOption(question: $0, option: $1) },
-                                onCustom: { model.setCustomIntakeAnswer(question: $0, text: $1) },
-                                onToggleSkip: { model.toggleSkipIntakeQuestion(question: $0) },
-                                onSubmit: { Task { await model.submitIntake() } }
-                            )
-                            .id(Self.intakeID)
-                        }
-
                         if model.isResponding {
                             ReasoningRow().id(Self.reasoningRowID)
-                        }
-
-                        // Let the user close the loop (Finish is a deliberate tap, not AI-guessed).
-                        if model.canFinish {
-                            finishButton.id(Self.finishID)
                         }
                     }
                     .padding()
                 }
                 .onChange(of: model.transcript.count) { scrollToBottom(proxy) }
                 .onChange(of: model.isResponding) { scrollToBottom(proxy) }
-                .onChange(of: model.pendingIntake != nil) { scrollToBottom(proxy) }
             }
 
-            // Stays enabled during the quiz — typing there answers directly
-            // instead of filling in the questions (see ChatViewModel.send).
-            InputBar(
-                text: $model.draft,
-                isResponding: model.isResponding,
-                placeholder: model.pendingIntake != nil ? "Or answer directly…" : "Ask follow-up…"
-            ) {
+            InputBar(text: $model.draft, isResponding: model.isResponding) {
                 Task { await model.sendDraft() }
             }
             .padding(.horizontal)
@@ -156,40 +131,45 @@ private struct ChatScreen: View {
         AssistantText(text: "Hi! I'm your BCA assistant. Ask me about loans, accounts, or cards — or start with one of these:")
     }
 
-    private var finishButton: some View {
-        Button { Task { await model.finishConversation() } } label: {
-            HStack(spacing: 6) {
-                Image(systemName: "checkmark.circle.fill")
-                Text("This works for me — finish")
-            }
-            .font(.subheadline).fontWeight(.medium)
-            .foregroundStyle(Theme.accent)
-            .padding(.horizontal, 16)
-            .frame(minHeight: 44)
-            .background(Capsule().fill(Theme.hairline))
-        }
-        .buttonStyle(.plain)
-    }
-
     @ViewBuilder
     private func transcriptRow(_ item: TranscriptItem) -> some View {
         switch item {
         case .user(_, let text):
             UserBubble(text: text)
 
-        case .assistant(_, let answer, let cards):
+        case .assistant(let id, let answer, let cards, let question):
             VStack(alignment: .leading, spacing: 12) {
                 AssistantText(text: answer)
 
                 if !cards.isEmpty {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 12) {
-                            ForEach(cards) { card in
-                                ProductCardView(product: card) { selectedProduct = card }
+                            // The first card is the highest-confidence hit —
+                            // highlighted as the recommendation.
+                            ForEach(Array(cards.enumerated()), id: \.element.id) { index, card in
+                                ProductCardView(product: card, isRecommended: index == 0) {
+                                    selectedProduct = card
+                                }
                             }
                         }
-                        .padding(.vertical, 4)
+                        .padding(.vertical, 10)
                     }
+                    // Let the card glow bleed instead of clipping into a hard
+                    // rectangle behind the carousel.
+                    .scrollClipDisabled()
+                }
+
+                // The current question (intake flow or one-off clarification):
+                // tappable only while it's the latest message and idle.
+                if let question,
+                   id == model.transcript.last?.id,
+                   !model.isResponding {
+                    QuestionCardView(
+                        question: question,
+                        progress: model.intakeFlow?.progress,
+                        onAnswer: { answer in Task { await model.handleQuestionAnswer(answer) } },
+                        onSkip: { Task { await model.skipCurrentQuestion() } }
+                    )
                 }
             }
 
@@ -204,8 +184,6 @@ private struct ChatScreen: View {
     // MARK: - Helpers
 
     private static let reasoningRowID = "reasoning-row"
-    private static let intakeID = "intake-quiz"
-    private static let finishID = "finish-button"
 
     private func send(_ text: String) {
         Task { await model.send(text) }
@@ -213,9 +191,7 @@ private struct ChatScreen: View {
 
     private func scrollToBottom(_ proxy: ScrollViewProxy) {
         withAnimation(.easeOut(duration: 0.25)) {
-            if model.pendingIntake != nil {
-                proxy.scrollTo(Self.intakeID, anchor: .bottom)
-            } else if model.isResponding {
+            if model.isResponding {
                 proxy.scrollTo(Self.reasoningRowID, anchor: .bottom)
             } else if let lastID = model.transcript.last?.id {
                 proxy.scrollTo(lastID, anchor: .bottom)

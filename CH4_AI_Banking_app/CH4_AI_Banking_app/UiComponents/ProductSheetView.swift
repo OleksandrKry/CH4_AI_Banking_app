@@ -50,7 +50,7 @@ struct ProductSheetView: View {
                     Button(action: onChoose) {
                         HStack(spacing: 8) {
                             Image(systemName: "checkmark.circle.fill")
-                            Text("This works for me — continue")
+                            Text("Apply")
                         }
                         .font(.headline)
                         .foregroundStyle(Theme.base)

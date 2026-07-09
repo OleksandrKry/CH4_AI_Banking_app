@@ -15,16 +15,91 @@ class RAGSystem {
 
     /// One persistent FoundationModels session per conversation. The session owns
     /// the transcript (native multi-turn memory) and the catalog tool — retrieval
-    /// runs only when the model decides the user needs new products.
-    private var chatSessions: [UUID: (session: LanguageModelSession, tool: ProductCatalogTool)] = [:]
+    /// runs only when the model decides the user needs new products. `approxChars`
+    /// tracks context growth toward the 4,096-token window.
+    private final class ChatSessionBox {
+        var session: LanguageModelSession
+        let tool: ProductCatalogTool
+        let baseChars: Int          // instructions + tool schema estimate
+        var approxChars: Int
+
+        init(session: LanguageModelSession, tool: ProductCatalogTool, baseChars: Int) {
+            self.session = session
+            self.tool = tool
+            self.baseChars = baseChars
+            self.approxChars = baseChars
+        }
+    }
+
+    private var chatSessions: [UUID: ChatSessionBox] = [:]
     private static let adHocSessionKey = UUID(uuidString: "00000000-0000-0000-0000-000000000000")!
 
     /// Per-request salary override (tests pass it explicitly); the tool's search
     /// closure reads it, falling back to the stored profile income.
     private var salaryOverride: Double?
 
+    // MARK: - Turn instrumentation (latency + context budget)
+
+    /// Wall-clock breakdown of the last `generateResponse` turn, plus a running
+    /// estimate of session context usage (~4 chars/token, 4,096-token window).
+    struct TurnMetrics {
+        var sessionSetup: Duration = .zero       // session create + prewarm (turn 1)
+        var generation: Duration = .zero         // session.respond incl. tool calls
+        var retrieval: Duration = .zero          // hybrid search inside the tool
+        var questionStructuring: Duration = .zero
+        var total: Duration = .zero
+        var approxContextTokens: Int = 0
+
+        var summary: String {
+            func ms(_ duration: Duration) -> String {
+                String(format: "%.0fms", duration / .milliseconds(1))
+            }
+            return "setup \(ms(sessionSetup)) | respond \(ms(generation)) "
+                + "(retrieval \(ms(retrieval))) | structureQ \(ms(questionStructuring)) "
+                + "| total \(ms(total)) | ctx ≈ \(approxContextTokens)/4096 tokens"
+        }
+    }
+
+    /// Metrics of the most recent turn — asserted in tests, printed in DEBUG.
+    private(set) var lastTurnMetrics = TurnMetrics()
+    private var turnRetrieval: Duration = .zero
+
     init(modelContext: ModelContext) {
         self.modelContext = modelContext
+    }
+
+    /// User-facing text for generation failures — raw error dumps must never
+    /// reach the chat (seen in the wild: "GenerationError error -1.").
+    static func friendlyFailureMessage(for error: Error) -> String {
+        if let generationError = error as? LanguageModelSession.GenerationError {
+            switch generationError {
+            case .guardrailViolation:
+                return "I can't help with that one — I'm BCA's banking assistant. Ask me about cards, accounts, loans, transfers, or payments!"
+            case .exceededContextWindowSize:
+                return "This conversation has grown too long for me — start a new chat to continue."
+            case .rateLimited:
+                return "I'm a little busy right now — please try again in a moment."
+            case .assetsUnavailable:
+                return "The on-device AI model isn't ready yet (it may still be downloading). Please try again shortly."
+            default:
+                return "Something went wrong on my side — please try sending that again."
+            }
+        }
+        return "Something went wrong on my side — please try sending that again."
+    }
+
+    /// Friendly explanation for why Apple Intelligence can't answer at all.
+    static func modelUnavailableMessage() -> String {
+        switch SystemLanguageModel.default.availability {
+        case .unavailable(.appleIntelligenceNotEnabled):
+            return "Apple Intelligence is turned off on this device. Enable it in Settings, then ask me again."
+        case .unavailable(.modelNotReady):
+            return "The on-device AI model is still getting ready (downloading). Please try again in a few minutes."
+        case .unavailable(.deviceNotEligible):
+            return "This device doesn't support Apple Intelligence, which I need to answer questions."
+        default:
+            return "The on-device AI isn't available right now — please try again later."
+        }
     }
 
     // MARK: - Core RAG Orchestrator (session + tool calling)
@@ -37,26 +112,45 @@ class RAGSystem {
     ///
     /// - Parameters:
     ///   - conversationID: scopes persisted messages + the session to one conversation.
-    ///   - intakeContext: the user's quiz answers, appended to the first turn's prompt.
+    ///   - intakeContext: the user's answers to the intake questions, folded into
+    ///     the first turn's prompt after the sequential question flow completes.
     func generateResponse(
         for userQuery: String,
         userSalary: Double? = nil,
         conversationID: UUID? = nil,
         intakeContext: String? = nil
     ) async throws -> RAGResult {
+        let clock = ContinuousClock()
+        let turnStart = clock.now
+        var metrics = TurnMetrics()
+
         // 1. Commit incoming user query to persistent conversation history
         let userMessage = ChatMessage(text: userQuery, isUser: true, conversationID: conversationID)
         modelContext.insert(userMessage)
         try? modelContext.save()
 
+        // Graceful degradation: never surface raw framework errors in chat.
+        guard SystemLanguageModel.default.isAvailable else {
+            let unavailable = Self.modelUnavailableMessage()
+            let aiMessage = ChatMessage(text: unavailable, isUser: false, conversationID: conversationID)
+            modelContext.insert(aiMessage)
+            try? modelContext.save()
+            return RAGResult(userInput: userQuery, aiAnswer: unavailable, citedDocuments: [],
+                             productCards: [], suggestedFollowUps: [], retrievalConfidence: nil)
+        }
+
         // 2. Per-conversation session: instructions (role, rules, profile, memory,
         //    tool policy) were set once at session creation; the transcript carries
-        //    the multi-turn context natively.
+        //    the multi-turn context natively. RAGSystem runs on the main actor
+        //    (project default isolation), so tool state is same-actor.
         salaryOverride = userSalary
-        let (session, tool) = chatSession(for: conversationID, firstQuery: userQuery)
-        await tool.beginTurn()
+        let setupStart = clock.now
+        let box = chatSession(for: conversationID, firstQuery: userQuery)
+        metrics.sessionSetup = setupStart.duration(to: clock.now) // ~0 after turn one
+        box.tool.beginTurn()
+        turnRetrieval = .zero
 
-        // 3. The prompt is just this turn: the query, plus quiz answers on turn one.
+        // 3. This turn's message, plus the intake answers on the first real turn.
         let prompt = intakeContext.map {
             "\(userQuery)\n\nMy answers to your clarifying questions:\n\($0)"
         } ?? userQuery
@@ -64,19 +158,22 @@ class RAGSystem {
         // 4. Generate. maximumResponseTokens is a hard backstop against a runaway
         //    response; the 3-4 sentence rule in the instructions shapes length.
         let options = GenerationOptions(maximumResponseTokens: 150)
+        let generationStart = clock.now
         let cleanAIResponse: String
         do {
-            cleanAIResponse = try await session.respond(to: prompt, options: options).content
+            cleanAIResponse = try await box.session.respond(to: prompt, options: options).content
         } catch LanguageModelSession.GenerationError.exceededContextWindowSize {
             // Documented recovery: fresh session seeded with the instructions and
             // the latest exchange (condensed transcript), then retry once.
-            let condensed = condensedChatSession(for: conversationID, from: session, tool: tool)
+            let condensed = condensedChatSession(in: box)
             cleanAIResponse = try await condensed.respond(to: prompt, options: options).content
         }
+        metrics.generation = generationStart.duration(to: clock.now)
+        metrics.retrieval = turnRetrieval
 
         // 5. Cards, citations, and confidence reflect what the model actually
         //    consulted this turn (empty when it answered from the transcript).
-        let retrieved = await MainActor.run { tool.retrievedThisTurn }
+        let retrieved = box.tool.retrievedThisTurn
         let relevantDocs = documents(withIDs: retrieved.map(\.id))
 
         let aiMessage = ChatMessage(
@@ -88,14 +185,123 @@ class RAGSystem {
         modelContext.insert(aiMessage)
         try? modelContext.save()
 
+        // 6. When the model asked a decision-tree qualifying question instead of
+        //    recommending (no products retrieved), structure it via one-shot
+        //    guided generation so the UI renders tappable option rows.
+        var followUps: [FollowUpQuestion] = []
+        if relevantDocs.isEmpty, cleanAIResponse.contains("?") {
+            let structuringStart = clock.now
+            let structurePrompt = """
+            A banking assistant asked the user this qualifying question:
+            "\(cleanAIResponse)"
+            Extract the single question (short) and 2 to 4 brief tappable options for it.
+            """
+            if let structured = try? await LanguageModelSession()
+                .respond(to: structurePrompt,
+                         generating: FollowUpQuestion.self,
+                         options: GenerationOptions(sampling: .greedy)).content {
+                followUps = [structured]
+            }
+            metrics.questionStructuring = structuringStart.duration(to: clock.now)
+        }
+
+        // Context budget: prompt + reply + tool output land in the transcript.
+        box.approxChars += prompt.count + cleanAIResponse.count + box.tool.outputCharsThisTurn
+        metrics.approxContextTokens = box.approxChars / 4
+        metrics.total = turnStart.duration(to: clock.now)
+        lastTurnMetrics = metrics
+        #if DEBUG
+        print("⏱ turn: " + metrics.summary)
+        #endif
+
         return RAGResult(
             userInput: userQuery,
             aiAnswer: cleanAIResponse,
             citedDocuments: relevantDocs,
             productCards: relevantDocs.map(ProductCardInfo.init(document:)),
-            suggestedFollowUps: [],
+            suggestedFollowUps: followUps,
             retrievalConfidence: retrieved.map(\.confidence).max()
         )
+    }
+
+    /// Generates the intake question batch ONCE per conversation: 3–6 decision-
+    /// tree-grounded clarifying questions (shape enforced by constrained
+    /// decoding), presented to the user one at a time with no further model
+    /// calls. Returns `[]` on failure — the caller then answers directly.
+    func generateIntakeQuestions(for query: String) async -> [FollowUpQuestion] {
+        guard SystemLanguageModel.default.isAvailable else { return [] }
+        let profileBlock = fetchUserProfile()?.promptSummary ?? "No profile information provided."
+
+        let prompt = """
+        You are a BCA banking assistant. A user just asked: "\(query)"
+
+        You already know this about the user:
+        \(profileBlock)
+
+        Using the decision tree below, generate 3 to 6 short clarifying questions
+        (most important first) that locate this user's need precisely enough to
+        recommend specific products. Walk the relevant branch: category first when
+        the request is broad, then the branch's qualifiers (use, amount, tenor).
+        Never re-ask what the profile already answers. Each question offers two to
+        four brief options; the user can also type their own answer or skip.
+
+        \(BankingDecisionTree.instructionsBlock)
+        """
+
+        do {
+            let session = LanguageModelSession()
+            let response = try await session.respond(
+                to: prompt,
+                generating: FollowUpSuggestions.self,
+                options: GenerationOptions(sampling: .greedy)
+            )
+            return response.content.questions
+        } catch {
+            print("⚠️ Intake question generation failed: \(error)")
+            return []
+        }
+    }
+
+    /// Routes the user's first message in ONE guided call: transactional vs
+    /// informational/smalltalk intent (gates the product flow) plus the product
+    /// category (labels the conversation). Constrained decoding always yields
+    /// valid cases. Degrades to (informational, retrieval-vote category) — the
+    /// safest failure: no quiz misfires, and the decision-tree instructions can
+    /// still qualify conversationally.
+    func triageQuery(for query: String) async -> (intent: QueryIntent, category: String) {
+        guard SystemLanguageModel.default.isAvailable else {
+            return (.informational, await classifyCategory(for: query))
+        }
+
+        let clock = ContinuousClock()
+        let start = clock.now
+        let prompt = """
+        Triage this message a user just sent to BCA's banking assistant.
+        Message: "\(query)"
+        """
+
+        do {
+            let session = LanguageModelSession()
+            let triage = try await session.respond(
+                to: prompt,
+                generating: QueryTriage.self,
+                options: GenerationOptions(sampling: .greedy)
+            ).content
+            #if DEBUG
+            print(String(format: "⏱ triage %.0fms → %@ / %@",
+                         start.duration(to: clock.now) / .milliseconds(1),
+                         triage.intent.rawValue, triage.category.rawValue))
+            #endif
+            return (triage.intent, triage.category.rawValue)
+        } catch {
+            print("⚠️ Query triage failed (\(error)); defaulting to informational.")
+            return (.informational, await classifyCategory(for: query))
+        }
+    }
+
+    /// Category-only convenience over `triageQuery` (kept for tests/labeling).
+    func classifyIntentCategory(for query: String) async -> String {
+        await triageQuery(for: query).category
     }
 
     // MARK: - Chat session lifecycle
@@ -106,25 +312,34 @@ class RAGSystem {
     private func chatSession(
         for conversationID: UUID?,
         firstQuery: String
-    ) -> (session: LanguageModelSession, tool: ProductCatalogTool) {
+    ) -> ChatSessionBox {
         let key = conversationID ?? Self.adHocSessionKey
         if let existing = chatSessions[key] { return existing }
 
         let tool = ProductCatalogTool { [weak self] query in
             guard let self else { return [] }
+            let retrievalStart = ContinuousClock.now
+            defer { self.turnRetrieval += retrievalStart.duration(to: ContinuousClock.now) }
             let salary = self.salaryOverride
                 ?? (self.fetchUserProfile().map { $0.monthlyIncome > 0 ? $0.monthlyIncome : nil } ?? nil)
-            return self.scoredSearchCore(for: query, userSalary: salary, limit: 2)
+            let hits = self.scoredSearchCore(for: query, userSalary: salary, limit: 2)
                 .filter { $0.confidence >= HybridRetriever.minimumConfidence }
+            // Weak trailing hits neither ground the model nor become cards —
+            // a second product that "doesn't fit" is worse than one good answer.
+            return HybridRetriever.cardworthyHits(hits)
         }
 
-        let session = LanguageModelSession(
-            tools: [tool],
-            instructions: chatInstructions(for: conversationID, firstQuery: firstQuery)
-        )
+        let instructions = chatInstructions(for: conversationID, firstQuery: firstQuery)
+        let session = LanguageModelSession(tools: [tool], instructions: instructions)
         session.prewarm()
-        chatSessions[key] = (session, tool)
-        return (session, tool)
+
+        // ~600 chars covers the injected tool schema + framing overhead.
+        let box = ChatSessionBox(session: session, tool: tool, baseChars: instructions.count + 600)
+        chatSessions[key] = box
+        #if DEBUG
+        print("🧾 session instructions ≈ \(box.baseChars / 4) tokens")
+        #endif
+        return box
     }
 
     /// Static per-conversation guidance: role + answer rules + tool policy +
@@ -133,17 +348,21 @@ class RAGSystem {
     private func chatInstructions(for conversationID: UUID?, firstQuery: String) -> String {
         let profileBlock = fetchUserProfile()?.promptSummary ?? "No profile information provided."
 
-        let memories = fetchRelevantMemories(for: firstQuery, excluding: conversationID)
+        // Context budget: memories capped at 2 one-liners, recap at 4 messages
+        // truncated to ~140 chars each (the 4,096-token window is shared with
+        // the decision tree, tool outputs, and every turn of the conversation).
+        let memories = fetchRelevantMemories(for: firstQuery, excluding: conversationID, limit: 2)
         let memoryBlock = memories.isEmpty
             ? ""
             : "\nRelevant past conversations (memory):\n" + memories.map { "- \($0)" }.joined(separator: "\n") + "\n"
 
         var recapBlock = ""
         if let conversationID {
-            let recent = fetchRecentChatHistory(limit: 6, conversationID: conversationID)
+            let recent = fetchRecentChatHistory(limit: 4, conversationID: conversationID)
             if !recent.isEmpty {
-                recapBlock = "\nEarlier in this conversation:\n"
-                    + recent.map { "\($0.isUser ? "User" : "Assistant"): \($0.text)" }.joined(separator: "\n") + "\n"
+                recapBlock = "\nEarlier in this conversation:\n" + recent
+                    .map { "\($0.isUser ? "User" : "Assistant"): \($0.text.prefix(140))" }
+                    .joined(separator: "\n") + "\n"
             }
         }
 
@@ -154,9 +373,15 @@ class RAGSystem {
         - Keep your answer to 3-4 sentences maximum. Be concise: answer only what was asked and do not volunteer unrelated products, caveats, or extra detail. Make sure the sentences are understandable.
         - Deliver a natural, friendly answer. No technical syntax, database references, or raw delimiters like pipes (|).
         - Respond in the user's language, whatever it is.
-        - Recommend ONLY products returned by the searchProductCatalog tool in this conversation. Call the tool when the user asks for a recommendation or about new or different products. Do NOT call it for questions about products already discussed — answer those from the conversation.
-        - Tailor recommendations to the User Profile and the user's quiz answers when relevant.
+        - Follow the decision tree below: qualify with at most ONE short question per turn, and skip qualifying entirely when the user's need or profile already pins the branch.
+        - Recommend ONLY products returned by the searchProductCatalog tool in this conversation. Call the tool once a tree leaf is clear, or when the user asks about new or different products. Do NOT call it when the user refers to products already shown ("that card", "the first one", "its fee") — answer those from the conversation.
+        - Never repeat the tool's raw product listing verbatim — synthesize a natural sentence or two from it.
+        - If asked who you are or what you can do: you are BCA's banking assistant — the user can ask about banking products and services and you will answer and suggest options. Do not call the tool for this.
+        - You have no access to real-time data (time, weather, rates today). For those or other unrelated smalltalk, say so in one friendly sentence and offer banking help instead.
+        - Tailor recommendations and qualifying questions to the User Profile (never re-ask what it already answers, e.g. income or occupation).
         - If no relevant product was found, politely decline to guess.
+
+        \(BankingDecisionTree.instructionsBlock)
 
         User Profile:
         \(profileBlock)
@@ -166,19 +391,16 @@ class RAGSystem {
 
     /// Apple's documented context-window recovery: keep the first transcript entry
     /// (instructions) and the last, drop the middle, and continue on a new session.
-    private func condensedChatSession(
-        for conversationID: UUID?,
-        from session: LanguageModelSession,
-        tool: ProductCatalogTool
-    ) -> LanguageModelSession {
-        let entries = [session.transcript.first, session.transcript.last].compactMap { $0 }
-        let fresh = LanguageModelSession(tools: [tool], transcript: Transcript(entries: entries))
-        chatSessions[conversationID ?? Self.adHocSessionKey] = (fresh, tool)
+    private func condensedChatSession(in box: ChatSessionBox) -> LanguageModelSession {
+        let entries = [box.session.transcript.first, box.session.transcript.last].compactMap { $0 }
+        let fresh = LanguageModelSession(tools: [box.tool], transcript: Transcript(entries: entries))
+        box.session = fresh
+        box.approxChars = box.baseChars + 800 // instructions + roughly one exchange
         return fresh
     }
 
-    /// Builds + prewarms the session ahead of time (called while the user fills
-    /// the intake quiz, so the KV cache is hot before the first answer).
+    /// Builds + prewarms the session ahead of time so the KV cache is hot before
+    /// the first answer of a conversation.
     func warmChatSession(for conversationID: UUID?, firstQuery: String) {
         _ = chatSession(for: conversationID, firstQuery: firstQuery)
     }
@@ -189,7 +411,7 @@ class RAGSystem {
         chatSessions[conversationID ?? Self.adHocSessionKey] = nil
     }
 
-    // MARK: - Intake: category classification + dynamic quiz generation
+    // MARK: - Category classification (labels conversations for history + memory)
 
     /// Classifies a query into a product category by reusing the retrieval we already run:
     /// the majority category among the top hits. No CoreML, no extra model call. Returns ""
@@ -204,43 +426,7 @@ class RAGSystem {
         return counts.max { $0.value < $1.value }?.key ?? top[0].category
     }
 
-    /// Generates the category-specific intake quiz (3–6 questions, shape enforced by
-    /// constrained decoding) — the questions the user answers BEFORE the first
-    /// recommendation. Seeded with what we already know (durable profile) so it
-    /// doesn't re-ask occupation/income. Returns `[]` only on generation failure —
-    /// the caller then answers directly without a quiz.
-    func generateIntakeQuiz(for query: String, category: String) async -> [FollowUpQuestion] {
-        let profileBlock = fetchUserProfile()?.promptSummary ?? "No profile information provided."
-        let categoryLabel = category.isEmpty ? "banking" : category
 
-        let focusLine = category.isEmpty
-            ? "The query is broad, so the FIRST question must ask which product category they need (e.g. loan, savings, card, investment, transfers)."
-            : "Only ask what actually changes the recommendation within \"\(categoryLabel)\" (e.g. intended use, amount, tenor, travel frequency)."
-
-        let prompt = """
-        You are a BCA banking assistant preparing to recommend products in the "\(categoryLabel)" category.
-        The user asked: "\(query)"
-
-        You already know this about the user:
-        \(profileBlock)
-
-        Generate 3 to 6 short clarifying questions to gather the context needed for a precise
-        recommendation, ordered most important first. \(focusLine)
-        Do NOT re-ask occupation or income — those are already known. Each question offers two to
-        four brief, tappable options covering the most common answers; the user can also type
-        their own answer or skip a question, so options don't need to be exhaustive.
-        """
-
-        do {
-            let session = LanguageModelSession()
-            let response = try await session.respond(to: prompt, generating: FollowUpSuggestions.self)
-            return response.content.questions
-        } catch {
-            print("⚠️ Intake quiz generation failed: \(error.localizedDescription)")
-            return []
-        }
-    }
-    
     // MARK: - Long-term memory (past conversations)
 
     /// Returns the most relevant finished-conversation summaries for a query. Pulls a recent

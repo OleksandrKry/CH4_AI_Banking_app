@@ -62,6 +62,29 @@ enum HybridRetriever {
     /// prompt's decline instruction handles those with the context in view.
     static let minimumConfidence = 0.25
 
+    /// Card display policy: the best hit is always worth grounding on, but a
+    /// TRAILING hit becomes a product card only when it clears `cardConfidence`
+    /// AND sits within `cardMargin` of the top hit — a weak second product reads
+    /// as a wrong answer in the UI. Calibrated 2026-07 via the golden-set sweep
+    /// (scripts/retrieval-eval.sh): margin 0.10 lifts card precision 0.64 → 0.80
+    /// with recall unchanged at 0.91 — the margin only ever removes wrong cards.
+    static let cardConfidence = 0.35
+    static let cardMargin = 0.10
+
+    /// Applies the card policy to confidence-floored, ranked hits. `floor` and
+    /// `margin` are injectable so the eval harness can sweep candidate values.
+    static func cardworthyHits(
+        _ hits: [RetrievalHit],
+        floor: Double = cardConfidence,
+        margin: Double = cardMargin
+    ) -> [RetrievalHit] {
+        guard let top = hits.first else { return [] }
+        let trailing = hits.dropFirst().filter {
+            $0.confidence >= floor && $0.confidence >= top.confidence - margin
+        }
+        return [top] + trailing
+    }
+
     /// Ranks `documents` against `query`. Pure function of its inputs; the query
     /// embedder is injectable so tests and the eval harness can pin the backend.
     static func rank(

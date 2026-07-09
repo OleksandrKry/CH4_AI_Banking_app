@@ -104,10 +104,15 @@ final class SpeechRecognizer {
                     }
                     
                     if let error {
-                        // Don't treat cancellation as an error
+                        // Cancellation is a NORMAL outcome (user stopped dictation)
+                        // and arrives under several domains/codes depending on the
+                        // OS path — never surface it as an error banner.
                         let nsError = error as NSError
-                        if nsError.domain == "kAFAssistantErrorDomain" && nsError.code == 216 {
-                            // User cancelled — not an error
+                        let isCancellation = (nsError.domain == "kAFAssistantErrorDomain" && nsError.code == 216)
+                            || nsError.code == 301 // kLSRErrorDomain: recognition request was canceled
+                            || error.localizedDescription.localizedCaseInsensitiveContains("cancel")
+                        if isCancellation {
+                            // Expected when the user taps stop — not an error.
                         } else if nsError.code != 1 { // Code 1 = no speech detected (normal)
                             self.errorMessage = "Recognition error: \(error.localizedDescription)"
                         }

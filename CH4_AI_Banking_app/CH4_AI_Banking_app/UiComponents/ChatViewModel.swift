@@ -2,62 +2,58 @@
 //  ChatViewModel.swift
 //  CH4_AI_Banking_app
 //
-//  Drives the chat screen through the conversation state machine:
-//    intake (classify → 3–6-question quiz with options / own answer / skip;
-//    typing instead of finishing the quiz answers directly)
-//    → loop (answer directly, no quiz) → finished (user tap).
-//  A new query after "finished" starts a fresh Conversation back in intake.
-//  Uses Observation (no Combine).
+//  Drives the chat screen. Pure chatbot: no pre-conversation quiz — the model
+//  qualifies the user conversationally along the decision tree in its session
+//  instructions (see BankingDecisionTree), then recommends. Finish is a user tap
+//  that summarizes the conversation into memory; a new query afterwards starts a
+//  fresh Conversation. Uses Observation (no Combine).
 //
 
 import Foundation
 import SwiftData
 import Observation
 
-/// One entry in the on-screen transcript.
+/// One entry in the on-screen transcript. An assistant entry may carry ONE
+/// structured qualifying question (decision-tree step) that the UI renders as
+/// tappable option rows — questions arrive one per turn, never as a batch.
 enum TranscriptItem: Identifiable {
     case user(id: UUID, text: String)
-    case assistant(id: UUID, answer: String, cards: [ProductCardInfo])
+    case assistant(id: UUID, answer: String, cards: [ProductCardInfo], question: FollowUpQuestion?)
     case notice(id: UUID, text: String)
 
     var id: UUID {
         switch self {
         case .user(let id, _): return id
-        case .assistant(let id, _, _): return id
+        case .assistant(let id, _, _, _): return id
         case .notice(let id, _): return id
         }
     }
 }
 
-/// A dynamic intake quiz awaiting the user's answers. Each question can be
-/// answered with a provided option, with the user's own typed text, or skipped.
-struct PendingIntake {
-    let query: String
-    let category: String
+/// The sequential intake flow: 3–6 questions generated ONCE per conversation,
+/// asked one at a time. Answers accumulate locally — zero model calls between
+/// questions; the single grounded answer fires after the last one.
+struct IntakeFlow {
+    let originalQuery: String
     let questions: [FollowUpQuestion]
-    var answers: [String: String] = [:]   // question -> selected option / custom text
-    var skipped: Set<String> = []         // questions the user chose not to answer
+    private(set) var answers: [(question: String, answer: String?)] = []  // nil = skipped
 
-    /// Every question is either answered or deliberately skipped.
-    var allResolved: Bool {
-        questions.allSatisfy { answers[$0.question] != nil || skipped.contains($0.question) }
+    var current: FollowUpQuestion? {
+        answers.count < questions.count ? questions[answers.count] : nil
+    }
+    var isComplete: Bool { answers.count == questions.count }
+    var progress: String { "\(min(answers.count + 1, questions.count))/\(questions.count)" }
+
+    mutating func record(_ answer: String?) {
+        guard let current else { return }
+        let trimmed = answer?.trimmingCharacters(in: .whitespacesAndNewlines)
+        answers.append((current.question, (trimmed?.isEmpty ?? true) ? nil : trimmed))
     }
 
-    var answeredCount: Int { questions.filter { answers[$0.question] != nil }.count }
-
-    /// True when the stored answer is the user's own text rather than an option.
-    func isCustomAnswer(for key: String) -> Bool {
-        guard let answer = answers[key],
-              let question = questions.first(where: { $0.question == key }) else { return false }
-        return !question.options.contains(answer)
-    }
-
-    /// Compiled answers injected into the answer prompt (skipped questions omitted).
+    /// Compiled Q/A pairs for the answer prompt (skipped questions omitted).
     func summary() -> String {
-        questions.compactMap { question in
-            answers[question.question].map {
-                "- \(question.question): \($0.trimmingCharacters(in: .whitespacesAndNewlines))"
-            }
+        answers.compactMap { pair in
+            pair.answer.map { "- \(pair.question): \($0)" }
         }.joined(separator: "\n")
     }
 }
@@ -68,11 +64,11 @@ final class ChatViewModel {
     var transcript: [TranscriptItem] = []
     var draft = ""
     var isResponding = false
-    var pendingIntake: PendingIntake?
     var phase: ConversationPhase = .intake
+    var intakeFlow: IntakeFlow?
 
     /// True while the user is in the product-review loop and can end the conversation.
-    var canFinish: Bool { phase == .loop && pendingIntake == nil && !isResponding }
+    var canFinish: Bool { phase == .loop && !isResponding }
 
     private let rag: RAGSystem
     private let modelContext: ModelContext
@@ -95,12 +91,10 @@ final class ChatViewModel {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, !isResponding else { return }
 
-        // Typing while the quiz is on screen means "answer directly": dismiss the
-        // quiz and fold the message plus any answers so far into the context,
-        // instead of silently dropping the message (matches the input's hint).
-        if pendingIntake != nil {
-            transcript.append(.user(id: UUID(), text: trimmed))
-            await answerBypassingIntake(with: trimmed)
+        // While the intake flow is on screen, a typed message answers the
+        // current question — same as tapping an option.
+        if intakeFlow != nil {
+            await advanceIntake(with: trimmed)
             return
         }
 
@@ -111,70 +105,87 @@ final class ChatViewModel {
 
         transcript.append(.user(id: UUID(), text: trimmed))
 
-        switch activeConversation?.phase ?? .intake {
-        case .intake:          await runIntake(for: trimmed)
-        case .loop, .finished: await answer(for: trimmed, intakeContext: nil) // finished + new message = resume
-        }
-    }
+        // First message of a fresh conversation: ONE guided triage call decides
+        // the route — the product flow (intake questions → retrieval → cards)
+        // fires ONLY for transactional intent; informational and smalltalk
+        // queries get a direct conversational answer. The triage also labels
+        // the conversation's category. Session prewarms in parallel.
+        if let conversation = activeConversation, conversation.phase == .intake {
+            rag.warmChatSession(for: conversation.id, firstQuery: trimmed)
 
-    // MARK: - Intake quiz interaction
+            isResponding = true
+            let triage = await rag.triageQuery(for: trimmed)
+            isResponding = false
 
-    /// Tapping an option selects it (tapping the selected one deselects).
-    func selectIntakeOption(question: String, option: String) {
-        if pendingIntake?.answers[question] == option {
-            pendingIntake?.answers[question] = nil
-        } else {
-            pendingIntake?.answers[question] = option
-            pendingIntake?.skipped.remove(question)
-        }
-    }
+            conversation.category = triage.category
+            try? modelContext.save()
 
-    /// Free-text "own version" of an answer; blank text clears a custom answer
-    /// (but never a chip selection, which the field can't represent).
-    func setCustomIntakeAnswer(question: String, text: String) {
-        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            if pendingIntake?.isCustomAnswer(for: question) == true {
-                pendingIntake?.answers[question] = nil
+            if triage.intent == .transactional {
+                await startIntakeFlow(for: trimmed)
+            } else {
+                await answer(for: trimmed)
             }
+            return
+        }
+
+        await answer(for: trimmed) // finished + new message = resume
+    }
+
+    // MARK: - Sequential intake flow
+
+    private func startIntakeFlow(for query: String) async {
+        isResponding = true
+        let questions = await rag.generateIntakeQuestions(for: query)
+        isResponding = false
+
+        guard let first = questions.first else {
+            await answer(for: query) // generation unavailable → answer directly
+            return
+        }
+
+        intakeFlow = IntakeFlow(originalQuery: query, questions: questions)
+        transcript.append(.assistant(id: UUID(), answer: first.question, cards: [], question: first))
+    }
+
+    /// Records the reply (nil = skip), shows the next question, and fires the
+    /// single grounded answer once the last question is resolved.
+    private func advanceIntake(with reply: String?) async {
+        guard var flow = intakeFlow else { return }
+        transcript.append(.user(id: UUID(), text: reply ?? "Skip"))
+        flow.record(reply)
+
+        if let next = flow.current {
+            intakeFlow = flow
+            transcript.append(.assistant(id: UUID(), answer: next.question, cards: [], question: next))
+            return
+        }
+
+        intakeFlow = nil
+        activeConversation?.slots = Dictionary(
+            flow.answers.compactMap { pair in pair.answer.map { (pair.question, $0) } },
+            uniquingKeysWith: { first, _ in first }
+        )
+        try? modelContext.save()
+
+        let summary = flow.summary()
+        await answer(for: flow.originalQuery, intakeContext: summary.isEmpty ? nil : summary)
+    }
+
+    /// Question-card actions (also used by mid-conversation clarifying cards).
+    func handleQuestionAnswer(_ text: String) async {
+        if intakeFlow != nil {
+            await advanceIntake(with: text)
         } else {
-            pendingIntake?.answers[question] = text
-            pendingIntake?.skipped.remove(question)
+            await send(text)
         }
     }
 
-    /// Marks a question as deliberately unanswered (tap again to restore it).
-    func toggleSkipIntakeQuestion(question: String) {
-        if pendingIntake?.skipped.contains(question) == true {
-            pendingIntake?.skipped.remove(question)
+    func skipCurrentQuestion() async {
+        if intakeFlow != nil {
+            await advanceIntake(with: nil)
         } else {
-            pendingIntake?.skipped.insert(question)
-            pendingIntake?.answers[question] = nil
+            await send("No preference — please continue.")
         }
-    }
-
-    /// Submits the intake quiz: persists the answers as slots, then answers the original query.
-    func submitIntake() async {
-        guard let intake = pendingIntake else { return }
-        activeConversation?.slots = intake.answers
-        try? modelContext.save()
-
-        let summary = intake.summary()
-        pendingIntake = nil
-        await answer(for: intake.query, intakeContext: summary.isEmpty ? nil : summary)
-    }
-
-    /// The user typed instead of finishing the quiz: answer the ORIGINAL query,
-    /// carrying whatever they did answer plus their message as extra context.
-    private func answerBypassingIntake(with text: String) async {
-        guard let intake = pendingIntake else { return }
-        pendingIntake = nil
-
-        activeConversation?.slots = intake.answers
-        try? modelContext.save()
-
-        var context = intake.summary()
-        context += (context.isEmpty ? "" : "\n") + "- In their own words: \(text)"
-        await answer(for: intake.query, intakeContext: context)
     }
 
     // MARK: - Finishing
@@ -204,7 +215,7 @@ final class ChatViewModel {
     func newConversation() {
         rag.discardChatSession(for: activeConversation?.id)
         activeConversation = nil
-        pendingIntake = nil
+        intakeFlow = nil
         phase = .intake
         transcript = []
     }
@@ -215,7 +226,7 @@ final class ChatViewModel {
     func loadConversation(_ conversation: Conversation) {
         rag.discardChatSession(for: activeConversation?.id)
         activeConversation = conversation
-        pendingIntake = nil
+        intakeFlow = nil
         phase = conversation.phase
         transcript = rebuildTranscript(for: conversation.id)
     }
@@ -235,7 +246,8 @@ final class ChatViewModel {
                 return .user(id: message.id, text: message.text)
             }
             let cards = rag.documents(withIDs: message.citedDocumentIDs).map(ProductCardInfo.init(document:))
-            return .assistant(id: message.id, answer: message.text, cards: cards)
+            // Reloaded questions aren't interactive — the user answers in chat.
+            return .assistant(id: message.id, answer: message.text, cards: cards, question: nil)
         }
     }
 
@@ -250,31 +262,9 @@ final class ChatViewModel {
         phase = .intake
     }
 
-    /// Intake: classify the category (via retrieval), then generate the minimal quiz.
-    /// If no quiz is needed, answer immediately.
-    private func runIntake(for query: String) async {
-        guard let conversation = activeConversation else { return }
-        isResponding = true
-
-        let category = await rag.classifyCategory(for: query)
-        conversation.category = category
-        try? modelContext.save()
-
-        let quiz = await rag.generateIntakeQuiz(for: query, category: category)
-        isResponding = false
-
-        if quiz.isEmpty {
-            await answer(for: query, intakeContext: nil)
-        } else {
-            pendingIntake = PendingIntake(query: query, category: category, questions: quiz)
-            // Build + prewarm the conversation's session while the user fills the
-            // quiz, so the first answer starts from a hot KV cache.
-            rag.warmChatSession(for: conversation.id, firstQuery: query)
-        }
-    }
-
-    /// Loop: retrieve + generate the answer, persist it, and advance to the loop phase.
-    private func answer(for query: String, intakeContext: String?) async {
+    /// Generate the answer on the conversation's session (the model calls the
+    /// catalog tool itself), persist it, and advance to the loop phase.
+    private func answer(for query: String, intakeContext: String? = nil) async {
         guard let conversation = activeConversation else { return }
         isResponding = true
         defer { isResponding = false }
@@ -285,13 +275,21 @@ final class ChatViewModel {
                 conversationID: conversation.id,
                 intakeContext: intakeContext
             )
-            transcript.append(.assistant(id: UUID(), answer: result.aiAnswer, cards: result.productCards))
+            transcript.append(.assistant(
+                id: UUID(),
+                answer: result.aiAnswer,
+                cards: result.productCards,
+                question: result.suggestedFollowUps.first
+            ))
             conversation.phase = .loop
             phase = .loop
             try? modelContext.save()
         } catch {
+            // Friendly, actionable text — never a raw framework error dump.
             transcript.append(
-                .assistant(id: UUID(), answer: "Sorry, something went wrong: \(error.localizedDescription)", cards: [])
+                .assistant(id: UUID(),
+                           answer: RAGSystem.friendlyFailureMessage(for: error),
+                           cards: [], question: nil)
             )
         }
     }
