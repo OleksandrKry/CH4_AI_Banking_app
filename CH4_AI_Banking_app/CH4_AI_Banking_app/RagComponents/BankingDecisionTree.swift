@@ -16,27 +16,6 @@
 
 import FoundationModels
 
-/// Whether the user is shopping or just asking. TRANSACTIONAL intent is the
-/// only trigger for the product flow (intake questions → retrieval → cards);
-/// everything else gets a direct conversational answer.
-@Generable
-enum QueryIntent: String, CaseIterable {
-    case transactional   // wants to get/choose/apply for a banking product or service
-    case informational   // asks about the assistant, the bank, or how something works
-    case smalltalk       // greeting, chit-chat, or something unrelated to banking
-}
-
-/// One guided call answers both routing questions at once (best practice:
-/// a single constrained-decoding pass instead of two model round-trips).
-@Generable
-struct QueryTriage {
-    @Guide(description: "transactional ONLY when the user wants to get, compare, choose, or apply for a banking product or service. Questions about the assistant, the bank, or how things work are informational; greetings and unrelated topics are smalltalk.")
-    var intent: QueryIntent
-
-    @Guide(description: "The best-fitting product category; use General for informational or smalltalk queries.")
-    var category: IntentCategory
-}
-
 /// The intent categories the AI classifier chooses from — the decision tree's
 /// branches. Raw values overlap the corpus vocabulary ("loan"/"account"/"card"
 /// substrings) so `CategoryStyle` badges keep working. Constrained decoding

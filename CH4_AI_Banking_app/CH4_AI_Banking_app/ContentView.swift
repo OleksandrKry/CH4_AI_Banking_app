@@ -74,6 +74,9 @@ private struct ChatScreen: View {
                 }
                 .onChange(of: model.transcript.count) { scrollToBottom(proxy) }
                 .onChange(of: model.isResponding) { scrollToBottom(proxy) }
+                // Native chat behavior: dragging the transcript slides the
+                // keyboard away with the gesture (reverse the drag to cancel).
+                .scrollDismissesKeyboard(.interactively)
             }
 
             InputBar(text: $model.draft, isResponding: model.isResponding) {
