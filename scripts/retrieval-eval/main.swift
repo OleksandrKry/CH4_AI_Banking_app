@@ -118,6 +118,41 @@ print(String(format: """
              RetrievalEvaluator.percentile(positives, 0.5),
              negativeMax, (negativeMax + positiveP10) / 2))
 
+// Edge cases (typos / vague one-worders / code-switching): category steering
+// with a looser bar than the core set.
+print("\n— edge set (typos, vague, code-switching) —")
+print(RetrievalEvaluator.header())
+let edgeBM25 = RetrievalEvaluator.evaluate(label: "edge | bm25-only", corpus: bm25Corpus,
+                                           weights: .init(vector: 0, bm25: 1), tag: "none",
+                                           queries: RetrievalEvaluator.edgeSet, embedQuery: { _ in nil })
+print(RetrievalEvaluator.summaryLine(edgeBM25))
+if let ctx = backends.first(where: { $0.name == "ctx" }) {
+    let tag = "ctx+distilled"
+    let corpus = RetrievalEvaluator.buildCorpus(rows: rows, tag: tag,
+                                                embedText: buildEmbeddingText(from:), embed: ctx.embed)
+    let edgeCtx = RetrievalEvaluator.evaluate(label: "edge | ctx | distilled | hyb 0.4/1",
+                                              corpus: corpus, weights: .current, tag: tag,
+                                              queries: RetrievalEvaluator.edgeSet, embedQuery: ctx.embed)
+    print(RetrievalEvaluator.summaryLine(edgeCtx))
+    print("\n" + RetrievalEvaluator.details(edgeCtx))
+}
+
+// Card display policy sweep: how aggressively to suppress the weaker second
+// card (margin = max confidence gap to the top hit; 99 disables the margin).
+if let ctx = backends.first(where: { $0.name == "ctx" }) {
+    let tag = "ctx+distilled"
+    let corpus = RetrievalEvaluator.buildCorpus(rows: rows, tag: tag,
+                                                embedText: buildEmbeddingText(from:), embed: ctx.embed)
+    print("\n— card policy sweep (core set, floor 0.35) —")
+    for margin in [0.10, 0.15, 0.20, 99.0] {
+        let report = RetrievalEvaluator.evaluateCardPolicy(
+            label: "", corpus: corpus, weights: .current, tag: tag,
+            floor: HybridRetriever.cardConfidence, margin: margin, embedQuery: ctx.embed)
+        print(String(format: "margin %5.2f → precision %.2f | recall %.2f | avg cards %.2f",
+                     margin, report.precision, report.recall, report.averageCards))
+    }
+}
+
 // Raw signal table for the production configuration (contextual + distilled +
 // current weights) — the data behind the confidence formula and its floor.
 if let ctx = backends.first(where: { $0.name == "ctx" }) {

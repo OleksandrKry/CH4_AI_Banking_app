@@ -20,6 +20,12 @@ final class ContextualEmbedder: @unchecked Sendable {
     private var contextual: NLContextualEmbedding?
     private let fallback = NLEmbedding.sentenceEmbedding(for: .english)
 
+    /// NLEmbedding / NLContextualEmbedding instances are NOT thread-safe:
+    /// concurrent `vector(for:)` calls on one instance segfault inside BNNS
+    /// (seen under Swift Testing's parallel execution). All embedding work on
+    /// the shared instance is serialized through this lock.
+    private let embeddingLock = NSLock()
+
     private init() {}
 
     /// True if any embedder (contextual or fallback) can produce vectors.
@@ -70,16 +76,26 @@ final class ContextualEmbedder: @unchecked Sendable {
 
         do {
             try candidate.load()
-            contextual = candidate
+            install(candidate)
         } catch {
             print("⚠️ Contextual load failed; using NLEmbedding fallback: \(error.localizedDescription)")
         }
+    }
+
+    /// Synchronous on purpose: NSLock must not be taken in an async context.
+    private func install(_ model: NLContextualEmbedding) {
+        embeddingLock.lock()
+        contextual = model
+        embeddingLock.unlock()
     }
 
     /// Sentence vector for `text` — mean-pooled contextual vector if available,
     /// otherwise the fallback sentence embedding. Nil only if no model exists.
     func vector(for text: String) -> [Double]? {
         guard !text.isEmpty else { return nil }
+
+        embeddingLock.lock()
+        defer { embeddingLock.unlock() }
 
         if let contextual, let pooled = Self.meanPooledVector(for: text, using: contextual) {
             return pooled

@@ -85,8 +85,60 @@ struct BM25SearchTests {
     }
 }
 
+// MARK: - Sequential intake flow (pure struct logic — generate once, ask one by one)
+
+struct IntakeFlowTests {
+
+    private func makeFlow() -> IntakeFlow {
+        IntakeFlow(
+            originalQuery: "I want a loan",
+            questions: [
+                FollowUpQuestion(question: "Purpose?", options: ["Home", "Car"]),
+                FollowUpQuestion(question: "Amount?", options: ["<100M", ">100M"]),
+                FollowUpQuestion(question: "Tenor?", options: ["Short", "Long"]),
+            ]
+        )
+    }
+
+    @Test func walksQuestionsOneAtATime() {
+        var flow = makeFlow()
+        #expect(flow.current?.question == "Purpose?")
+        #expect(flow.progress == "1/3")
+
+        flow.record("Home")
+        #expect(flow.current?.question == "Amount?")
+        #expect(flow.progress == "2/3")
+        #expect(!flow.isComplete)
+
+        flow.record(nil)               // skip
+        flow.record("Long")
+        #expect(flow.isComplete)
+        #expect(flow.current == nil)
+    }
+
+    @Test func summaryKeepsAnswersAndOmitsSkips() {
+        var flow = makeFlow()
+        flow.record("Home")
+        flow.record(nil)               // skipped
+        flow.record("  Long  ")        // trimmed
+
+        let summary = flow.summary()
+        #expect(summary.contains("- Purpose?: Home"))
+        #expect(summary.contains("- Tenor?: Long"))
+        #expect(!summary.contains("Amount?"))
+    }
+
+    @Test func blankAnswerCountsAsSkip() {
+        var flow = makeFlow()
+        flow.record("   ")
+        #expect(flow.summary().isEmpty)
+        #expect(flow.current?.question == "Amount?") // still advanced
+    }
+}
+
 // MARK: - Vector Search (integration; requires the on-device embedding model)
 
+@MainActor // the app's types default to main-actor isolation (project setting)
 struct VectorSearchTests {
 
     /// Skips (not fails) on hosts without NL embedding assets, e.g. fresh simulators.
@@ -115,57 +167,5 @@ struct VectorSearchTests {
         let engine = VectorSearch(query: "best rewards credit card", documents: docs)
         let ranked = try #require(engine.rankBySimilarity())
         #expect(ranked.first?.id == "card")
-    }
-}
-
-// MARK: - Intake quiz state (pure struct logic — options / own answer / skip)
-
-struct IntakeFlowTests {
-
-    private func makeIntake() -> PendingIntake {
-        PendingIntake(
-            query: "I want a loan",
-            category: "Housing Loan",
-            questions: [
-                FollowUpQuestion(question: "Purpose?", options: ["New home", "Renovation"]),
-                FollowUpQuestion(question: "Tenure?", options: ["≤10y", "10–20y"]),
-                FollowUpQuestion(question: "Budget?", options: ["<1B", ">1B"]),
-            ]
-        )
-    }
-
-    @Test func resolvedMeansAnsweredOrSkipped() {
-        var intake = makeIntake()
-        #expect(!intake.allResolved)
-
-        intake.answers["Purpose?"] = "Renovation"       // provided option
-        intake.answers["Tenure?"] = "about 15 years"    // user's own version
-        #expect(!intake.allResolved)                    // one question still open
-
-        intake.skipped.insert("Budget?")                // deliberately skipped
-        #expect(intake.allResolved)
-        #expect(intake.answeredCount == 2)
-    }
-
-    @Test func customAnswersAreDetectedAgainstOptions() {
-        var intake = makeIntake()
-        intake.answers["Purpose?"] = "Renovation"
-        intake.answers["Tenure?"] = "about 15 years"
-
-        #expect(!intake.isCustomAnswer(for: "Purpose?"))
-        #expect(intake.isCustomAnswer(for: "Tenure?"))
-        #expect(!intake.isCustomAnswer(for: "Budget?")) // unanswered → not custom
-    }
-
-    @Test func summaryIncludesAnswersAndOmitsSkipped() {
-        var intake = makeIntake()
-        intake.answers["Purpose?"] = "New home"
-        intake.answers["Tenure?"] = "about 15 years  "  // raw text is trimmed in the summary
-        intake.skipped.insert("Budget?")
-
-        let summary = intake.summary()
-        #expect(summary.contains("- Purpose?: New home"))
-        #expect(summary.contains("- Tenure?: about 15 years"))
-        #expect(!summary.contains("Budget?"))
     }
 }

@@ -85,9 +85,9 @@ enum RetrievalEvaluator {
                     ["BI-FAST Transfer"]),
         GoldenQuery("I need to transfer five billion rupiah today, a very large amount",
                     ["RTGS Transfer"]),
-        // Debit cluster: GPN is local-only, Mastercard/Visa debit work abroad
+        // Debit cluster: GPN is local-only, the Mastercard debit works abroad
         GoldenQuery("Debit card I can use for online shopping on international websites",
-                    ["BCA Mastercard Debit", "BCA Visa Debit"]),
+                    ["BCA Mastercard Debit"]),
         // Indonesian queries — the contextual model is script-level multilingual,
         // the NLEmbedding fallback is English-only; these measure that gap.
         GoldenQuery("Kartu kredit untuk mengumpulkan miles Singapore Airlines",
@@ -108,6 +108,55 @@ enum RetrievalEvaluator {
         "How do I buy bitcoin and other cryptocurrency?",
         "What will the weather be like in Jakarta tomorrow?",
         "What are the visa requirements for studying in Australia?",
+        "Can you write me a poem about cats?",
+        "How do I cook beef rendang?",
+    ]
+
+    // MARK: - Edge-case set (typos, vague "dummy" queries, code-switching)
+
+    private static let travelCards: Set<String> = [
+        "BCA Mastercard World",
+        "BCA Singapore Airlines KrisFlyer Visa Signature",
+        "BCA Singapore Airlines KrisFlyer Visa Infinite",
+        "BCA Singapore Airlines PPS Club Visa Infinite",
+    ]
+    private static let allCards: Set<String> = travelCards.union([
+        "BCA Everyday Card", "BCA Card Platinum", "BCA Visa Batman", "BCA Visa Black",
+        "BCA Mastercard Globe", "BCA Mastercard Black", "BCA JCB Black", "BCA UnionPay",
+        "BCA tiket.com Mastercard", "BCA Blibli Mastercard", "BCA American Express Platinum",
+        "BCA Debit Card (GPN)", "BCA Mastercard Debit", "BCA Gold Debit (Tahapan Gold)",
+        "BCA Xpresi Debit Card",
+    ])
+    private static let allLoans: Set<String> = [
+        "KPR Pembelian", "KPR Refinancing", "KPR Renovasi", "KPR BCA Take Over",
+        "KKB BCA", "KSM BCA", "BCA Personal Loan", "BCA Secured Personal Loan",
+    ]
+    private static let savingsProducts: Set<String> = [
+        "Tahapan BCA", "Tahapan Xpresi", "Tahapan Gold", "BCA Dollar Account",
+        "Deposito Berjangka (Time Deposit)",
+    ]
+    private static let investments: Set<String> = [
+        "ORI / SBN (Government Bonds)", "Deposito Berjangka (Time Deposit)", "Bancassurance BCA",
+    ]
+
+    /// Edge cases for the "dummy user": sloppy spelling, one-word queries (ANY
+    /// product of the right branch counts — these measure category steering, not
+    /// pinpointing), and Indonesian/English code-switching. Evaluated separately
+    /// from the core set with looser floors.
+    static let edgeSet: [GoldenQuery] = [
+        // typos / sloppy input
+        GoldenQuery("kredit card for trvel miles", travelCards),
+        GoldenQuery("hoem loan to buy a huose", ["KPR Pembelian"]),
+        GoldenQuery("motorcyle lone", ["KSM BCA"]),
+        // code-switching
+        GoldenQuery("mau kartu kredit buat travel ke luar negeri", travelCards, language: "mix"),
+        GoldenQuery("transfer uang cepat dan murah antar bank", ["BI-FAST Transfer"], language: "id"),
+        // vague one-worders / dummy asks → right branch is a hit
+        GoldenQuery("card", allCards),
+        GoldenQuery("loan", allLoans),
+        GoldenQuery("savings", savingsProducts),
+        GoldenQuery("i need money", allLoans),
+        GoldenQuery("invest", investments),
     ]
 
     // MARK: - Corpus construction (mirrors app seeding, minus the LLM extraction)
@@ -115,7 +164,7 @@ enum RetrievalEvaluator {
     /// Condition-trait helper for embedding-dependent tests: prepares the shared
     /// embedder and reports availability, so hosts without NL assets (e.g. fresh
     /// simulators) SKIP those tests instead of failing them.
-    static func embedderAvailable() async -> Bool {
+    @MainActor static func embedderAvailable() async -> Bool {
         await ContextualEmbedder.shared.prepare()
         return ContextualEmbedder.shared.isReady
     }
@@ -181,11 +230,12 @@ enum RetrievalEvaluator {
         corpus: [LocalDocument],
         weights: HybridRetriever.Weights,
         tag: String,
+        queries: [GoldenQuery] = goldenSet,
         embedQuery: (String) -> [Double]?
     ) -> Report {
         let start = Date()
 
-        let outcomes = goldenSet.map { query -> QueryOutcome in
+        let outcomes = queries.map { query -> QueryOutcome in
             let hits = Array(
                 HybridRetriever.rank(query: query.text, documents: corpus, weights: weights,
                                      activeEmbeddingTag: tag, embedQuery: embedQuery)
@@ -201,10 +251,62 @@ enum RetrievalEvaluator {
                 .first?.confidence ?? 0
         }
 
-        let totalQueries = goldenSet.count + negativeSet.count
+        let totalQueries = queries.count + negativeSet.count
         let millis = Date().timeIntervalSince(start) * 1000 / Double(totalQueries)
         return Report(label: label, outcomes: outcomes,
                       negativeTopConfidences: negatives, meanQueryMillis: millis)
+    }
+
+    // MARK: - Card display policy (which trailing hits deserve a card?)
+
+    struct CardPolicyReport {
+        let label: String
+        let precision: Double     // shown cards that are expected products
+        let recall: Double        // queries whose expected product is among the cards
+        let averageCards: Double
+    }
+
+    /// Measures the card policy over a query set: floored top-2 hits, top always
+    /// kept, trailing hits kept per (floor, margin). Sweeping margin answers
+    /// "when should the second product card be suppressed?" with data.
+    static func evaluateCardPolicy(
+        label: String,
+        corpus: [LocalDocument],
+        weights: HybridRetriever.Weights,
+        tag: String,
+        floor: Double,
+        margin: Double,
+        queries: [GoldenQuery] = goldenSet,
+        embedQuery: (String) -> [Double]?
+    ) -> CardPolicyReport {
+        var precisions: [Double] = []
+        var recalls: [Double] = []
+        var counts: [Double] = []
+
+        for query in queries {
+            let floored = Array(
+                HybridRetriever.rank(query: query.text, documents: corpus, weights: weights,
+                                     activeEmbeddingTag: tag, embedQuery: embedQuery)
+                    .prefix(2)
+            ).filter { $0.confidence >= HybridRetriever.minimumConfidence }
+
+            let shown = HybridRetriever.cardworthyHits(floored, floor: floor, margin: margin)
+            guard !shown.isEmpty else {
+                precisions.append(0); recalls.append(0); counts.append(0)
+                continue
+            }
+            let names = shown.map(\.document.id)
+            let relevant = names.filter { query.expected.contains($0) }
+            precisions.append(Double(relevant.count) / Double(names.count))
+            recalls.append(relevant.isEmpty ? 0 : 1)
+            counts.append(Double(names.count))
+        }
+
+        func mean(_ values: [Double]) -> Double {
+            values.isEmpty ? 0 : values.reduce(0, +) / Double(values.count)
+        }
+        return CardPolicyReport(label: label, precision: mean(precisions),
+                                recall: mean(recalls), averageCards: mean(counts))
     }
 
     // MARK: - Formatting
