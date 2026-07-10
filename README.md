@@ -41,7 +41,6 @@ These frameworks are part of Apple's AI ecosystem and appear to integrate well t
 
 # 3. The Exploration Log
 
-> This section will be updated throughout the project.
 
 ## What we browsed, and what surprised us
 
@@ -55,7 +54,7 @@ These frameworks are part of Apple's AI ecosystem and appear to integrate well t
 
 ### Unexpected findings
 
-- *(To be completed during development.)*
+- The speech recognizer framework perform better than speech analyzer in catching the best voice for a short term voice input
 
 ---
 
@@ -70,27 +69,12 @@ These frameworks are part of Apple's AI ecosystem and appear to integrate well t
 - Defined project architecture
 - Assigned team responsibilities
 - Created project documentation
-
-### Planned experiments
-
 - Prototype SpeechAnalyzer
 - Create SwiftData models
 - Generate contextual embeddings
 - Build retrieval pipeline
 - Integrate Foundation Models
 - Test AI responses
-
----
-
-## What we discovered that we didn't expect
-
-*(To be completed during development.)*
-
----
-
-# 4. What We Tried and Dropped
-
-> This section will be completed after experimentation.
 
 
 ---
@@ -112,15 +96,14 @@ Potential topics include:
 
 # 6. The Revised Decision
 
-> This section will be completed near the end of the project.
 
 ## Final decision
 
-*(To be completed.)*
+- The name of our app is Arta AI
+- We used SpeechRecognizer instead of SpeechAnalyzer
 
 ## What changed since Section 1, and why
-
-*(To be completed.)*
+- SpeechAnalyzer -> SpeechRecognizer, because it worked better than speech analyzer framework
 
 ---
 
@@ -141,7 +124,7 @@ During development, we will evaluate whether using semantic retrieval provides a
 
 ## About Accessibility and Localization
 
-*(To be completed during development.)*
+- Speech-to-Text
 
 
 ---
@@ -174,7 +157,7 @@ No personal banking credentials, financial account information, or sensitive use
 - ✅ GitHub configured
 - ✅ Jira Kanban board created
 - ✅ Initial project planning completed
-- ⏳ AI prototype in progress
-- ⏳ SwiftData implementation pending
-- ⏳ Retrieval pipeline pending
-- ⏳ Foundation Models integration pending
+- ✅ AI prototype in progress
+- ✅ SwiftData implementation pending
+- ✅ Retrieval pipeline pending
+- ✅ Foundation Models integration pending
