@@ -65,7 +65,6 @@ class RAGSystem {
 
     /// Metrics of the most recent turn — asserted in tests, printed in DEBUG.
     private(set) var lastTurnMetrics = TurnMetrics()
-    private var turnRetrieval: Duration = .zero
 
     init(modelContext: ModelContext) {
         self.modelContext = modelContext
@@ -103,6 +102,17 @@ class RAGSystem {
         default:
             return "The on-device AI isn't available right now — please try again later."
         }
+    }
+
+    /// Proactive guardrail for the chat screen: nil when the model is available,
+    /// otherwise the same wording `modelUnavailableMessage` uses reactively per
+    /// turn. `SystemLanguageModel` is Observable, so a SwiftUI view reading this
+    /// in its `body` re-renders live if the user enables Apple Intelligence in
+    /// Settings and returns — no relaunch needed. Read BEFORE the user sends
+    /// anything, so an ineligible/disabled device is explained up front instead
+    /// of discovered turn by turn.
+    static var unavailabilityNotice: String? {
+        SystemLanguageModel.default.isAvailable ? nil : modelUnavailableMessage()
     }
 
     // MARK: - Core RAG Orchestrator (session + tool calling)
@@ -152,7 +162,6 @@ class RAGSystem {
         metrics.sessionSetup = setupStart.duration(to: clock.now) // ~0 after turn one
         box.tool.beginTurn()
         box.quizTool.beginTurn()
-        turnRetrieval = .zero
 
         // 3. This turn's message, plus the intake answers on the first real turn.
         let prompt = intakeContext.map {
@@ -173,7 +182,8 @@ class RAGSystem {
             cleanAIResponse = try await condensed.respond(to: prompt, options: options).content
         }
         metrics.generation = generationStart.duration(to: clock.now)
-        metrics.retrieval = turnRetrieval
+        // The tool owns its own latency (planning + search) — see ProductCatalogTool.
+        metrics.retrieval = box.tool.lastCallDuration
 
         // 5. Cards, citations, and confidence reflect what the model actually
         //    consulted this turn (empty when it answered from the transcript).
@@ -318,18 +328,28 @@ class RAGSystem {
         let key = conversationID ?? Self.adHocSessionKey
         if let existing = chatSessions[key] { return existing }
 
-        let tool = ProductCatalogTool { [weak self] query in
-            guard let self else { return [] }
-            let retrievalStart = ContinuousClock.now
-            defer { self.turnRetrieval += retrievalStart.duration(to: ContinuousClock.now) }
-            let salary = self.salaryOverride
-                ?? (self.fetchUserProfile().map { $0.monthlyIncome > 0 ? $0.monthlyIncome : nil } ?? nil)
-            let hits = self.scoredSearchCore(for: query, userSalary: salary, limit: 2)
-                .filter { $0.confidence >= HybridRetriever.minimumConfidence }
-            // Weak trailing hits neither ground the model nor become cards —
-            // a second product that "doesn't fit" is worse than one good answer.
-            return HybridRetriever.cardworthyHits(hits)
-        }
+        let tool = ProductCatalogTool(
+            conversationUserInputs: { [weak self] in
+                // Every user message in THIS conversation so far — the ground
+                // truth RetrievalPlanner classifies against. Ad-hoc sessions
+                // (no conversationID, used by standalone test calls) have no
+                // persisted history to scope to, so they plan from the tool's
+                // own argument alone.
+                guard let self, let conversationID else { return [] }
+                return self.fetchMessages(conversationID: conversationID)
+                    .filter(\.isUser).map(\.text)
+            },
+            search: { [weak self] query, category in
+                guard let self else { return [] }
+                let salary = self.salaryOverride
+                    ?? (self.fetchUserProfile().map { $0.monthlyIncome > 0 ? $0.monthlyIncome : nil } ?? nil)
+                let hits = self.scoredSearchCore(for: query, category: category, userSalary: salary, limit: 2)
+                    .filter { $0.confidence >= HybridRetriever.minimumConfidence }
+                // Weak trailing hits neither ground the model nor become cards —
+                // a second product that "doesn't fit" is worse than one good answer.
+                return HybridRetriever.cardworthyHits(hits)
+            }
+        )
 
         let quizTool = IntakeQuizTool()
         let instructions = chatInstructions(for: conversationID, firstQuery: firstQuery)
@@ -405,8 +425,13 @@ class RAGSystem {
     }
 
     /// Builds + prewarms the session ahead of time so the KV cache is hot before
-    /// the first answer of a conversation.
+    /// the first answer of a conversation. Guarded like every other entry point
+    /// that touches the model — this is the one caller of `chatSession` that
+    /// isn't already behind `generateResponse`'s availability guard (it runs
+    /// from `ChatViewModel.send` before the first turn), so on an unavailable
+    /// device it would otherwise build and prewarm a session that can never respond.
     func warmChatSession(for conversationID: UUID?, firstQuery: String) {
+        guard SystemLanguageModel.default.isAvailable else { return }
         _ = chatSession(for: conversationID, firstQuery: firstQuery)
     }
 
@@ -420,7 +445,11 @@ class RAGSystem {
 
     /// Classifies a query into a product category by reusing the retrieval we already run:
     /// the majority category among the top hits. No CoreML, no extra model call. Returns ""
-    /// when nothing relevant is found (query too vague to classify).
+    /// when nothing relevant is found (query too vague to classify). The winning RAW
+    /// category is mapped through `CategoryTaxonomy` before returning, so this fallback
+    /// path returns the same canonical labels as the LLM-guided `classifyIntentCategory`
+    /// (e.g. "Travel Credit Card" and "Co-branded Credit Card" both collapse to "Credit
+    /// Card") instead of leaking one of the corpus's 29 inconsistent raw strings.
     func classifyCategory(for query: String) async -> String {
         let profile = fetchUserProfile()
         let salary = profile.map { $0.monthlyIncome > 0 ? $0.monthlyIncome : nil } ?? nil
@@ -428,7 +457,8 @@ class RAGSystem {
         guard !top.isEmpty else { return "" }
 
         let counts = Dictionary(grouping: top, by: { $0.category }).mapValues(\.count)
-        return counts.max { $0.value < $1.value }?.key ?? top[0].category
+        let majorityRawCategory = counts.max { $0.value < $1.value }?.key ?? top[0].category
+        return CategoryTaxonomy.bucket(for: majorityRawCategory).rawValue
     }
 
 
@@ -466,6 +496,9 @@ class RAGSystem {
     func summarizeConversation(id: UUID, category: String) async -> String {
         let messages = fetchMessages(conversationID: id)
         guard !messages.isEmpty else { return "" }
+        guard SystemLanguageModel.default.isAvailable else {
+            return messages.first(where: \.isUser)?.text ?? ""
+        }
 
         let transcript = messages
             .map { "\($0.isUser ? "User" : "Assistant"): \($0.text)" }
@@ -512,22 +545,35 @@ class RAGSystem {
     }
 
     // MARK: - Dual Hybrid Search Engine Integration
-    
-    func searchRelevantDocuments(for query: String, userSalary: Double? = nil, limit: Int = 3) async -> [LocalDocument] {
-        await scoredSearch(for: query, userSalary: userSalary, limit: limit).map(\.document)
+
+    func searchRelevantDocuments(
+        for query: String, category: IntentCategory? = nil, userSalary: Double? = nil, limit: Int = 3
+    ) async -> [LocalDocument] {
+        await scoredSearch(for: query, category: category, userSalary: userSalary, limit: limit).map(\.document)
     }
 
     /// Scored hybrid search — the retrieval entry point. Returns the top hits with
     /// their cosine/BM25/RRF scores and calibrated confidence so callers can
     /// threshold, log, and evaluate retrieval instead of trusting bare documents.
     /// The ranking itself lives in `HybridRetriever` (shared with the eval harness).
-    func scoredSearch(for query: String, userSalary: Double? = nil, limit: Int = 3) async -> [RetrievalHit] {
-        scoredSearchCore(for: query, userSalary: userSalary, limit: limit)
+    func scoredSearch(
+        for query: String, category: IntentCategory? = nil, userSalary: Double? = nil, limit: Int = 3
+    ) async -> [RetrievalHit] {
+        scoredSearchCore(for: query, category: category, userSalary: userSalary, limit: limit)
     }
 
     /// Synchronous core of `scoredSearch` — also called by `ProductCatalogTool`
-    /// from inside a generation turn (on the main actor).
-    func scoredSearchCore(for query: String, userSalary: Double? = nil, limit: Int = 3) -> [RetrievalHit] {
+    /// from inside a generation turn (on the main actor). When `category` is
+    /// supplied (non-general), candidates are SCOPED to that taxonomy bucket
+    /// before ranking — see `RetrievalPlanner` / `CategoryTaxonomy` for why:
+    /// the corpus's raw categories are inconsistent (29 strings for 10 taxonomy
+    /// buckets), and unscoped ranking lets a query from one category surface a
+    /// product from a completely unrelated one on embedding noise alone. A
+    /// misclassification that would empty the candidate set falls back to the
+    /// unscoped set rather than returning nothing.
+    func scoredSearchCore(
+        for query: String, category: IntentCategory? = nil, userSalary: Double? = nil, limit: Int = 3
+    ) -> [RetrievalHit] {
         var documents = fetchLocalDocuments()
         guard !documents.isEmpty else { return [] }
 
@@ -536,6 +582,11 @@ class RAGSystem {
             documents = documents.filter { doc in
                 return doc.minIncome == 0.0 || doc.minIncome <= salary
             }
+        }
+
+        if let category, category != .general {
+            let scoped = CategoryTaxonomy.documents(in: category, from: documents)
+            if !scoped.isEmpty { documents = scoped }
         }
 
         let hits = HybridRetriever.rank(

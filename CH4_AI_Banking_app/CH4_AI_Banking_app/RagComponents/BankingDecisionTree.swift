@@ -2,11 +2,17 @@
 //  BankingDecisionTree.swift
 //  CH4_AI_Banking_app
 //
-//  The whiteboard decision tree, verified against bca-products.json (52
-//  products, all covered). It is the BACKBONE of the chat: the session
-//  instructions embed it so the model can locate the user's need, ask the
-//  branch's basic qualifying question conversationally (one per turn — there is
-//  no pre-chat quiz), and only then call the catalog tool for the leaf products.
+//  The whiteboard decision tree. Category coverage against the live corpus is
+//  enforced by CategoryTaxonomy (raw JSON category strings -> this tree's
+//  branches) and tested exhaustively by
+//  RetrievalAccuracyTests.categoryTaxonomyIsExhaustive, so a new product with
+//  an unmapped category fails that test instead of silently becoming
+//  unreachable — deliberately not hardcoding a product count here, since the
+//  hand-curated corpus size moves often and a stale count is worse than none.
+//  It is the BACKBONE of the chat: the session instructions embed it so the
+//  model can locate the user's need, ask the branch's basic qualifying
+//  question conversationally (one per turn — there is no pre-chat quiz), and
+//  only then call the catalog tool for the leaf products.
 //
 //  Whiteboard scope decisions: personal banking only — business services and
 //  student loans are explicitly out of scope. Income qualifier for cards:
@@ -17,9 +23,11 @@
 import FoundationModels
 
 /// The intent categories the AI classifier chooses from — the decision tree's
-/// branches. Raw values overlap the corpus vocabulary ("loan"/"account"/"card"
-/// substrings) so `CategoryStyle` badges keep working. Constrained decoding
-/// guarantees the classifier always returns one of these.
+/// branches, and the buckets `CategoryTaxonomy` maps every raw corpus category
+/// into for category-scoped retrieval. Raw values overlap the corpus
+/// vocabulary ("loan"/"account"/"card" substrings) so `CategoryStyle` badges
+/// keep working. Constrained decoding guarantees the classifier always
+/// returns one of these.
 @Generable
 enum IntentCategory: String, CaseIterable {
     case creditCard = "Credit Card"

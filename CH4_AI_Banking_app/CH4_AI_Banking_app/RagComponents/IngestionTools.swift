@@ -37,8 +37,14 @@ func buildEmbeddingText(from row: RawRow) -> String {
         .joined(separator: ". ")
 }
 
-/// Uses Apple Intelligence to parse messy text fields into standardized numerical variables on-device
+/// Uses Apple Intelligence to parse messy text fields into standardized numerical variables on-device.
+/// Guards first: called 47x in a row during first-launch seeding (one per product), so on a device
+/// where the model is unavailable (ineligible hardware, Apple Intelligence off, or assets still
+/// downloading) this must fail INSTANTLY rather than attempt — and await the failure of — every
+/// single call, which is what made early seeding feel hung on those devices.
 func extractNumericalMetadata(from rawText: String) async -> (minIncome: Double, annualFee: Double, maxLimit: Double) {
+    guard SystemLanguageModel.default.isAvailable else { return (0.0, 0.0, 0.0) }
+
     let extractionPrompt = """
     Analyze the unstructured banking product specifications provided below. 
     Extract the following three fields as pure numbers (integers or doubles) with no currency symbols or commas.

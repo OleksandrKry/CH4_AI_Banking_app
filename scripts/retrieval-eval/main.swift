@@ -137,6 +137,38 @@ if let ctx = backends.first(where: { $0.name == "ctx" }) {
     print("\n" + RetrievalEvaluator.details(edgeCtx))
 }
 
+// Category-gate ablation: SAME query subset (ones with a hand-authored ground-
+// truth category), unscoped vs. scoped-to-category-before-ranking. Isolates
+// what the gate buys in retrieval quality; the real on-device classifier's
+// OWN accuracy is verified separately in RAGSystemTests (needs Apple
+// Intelligence, unavailable in this headless CLI binary).
+if let ctx = backends.first(where: { $0.name == "ctx" }) {
+    let tag = "ctx+distilled"
+    let corpus = RetrievalEvaluator.buildCorpus(rows: rows, tag: tag,
+                                                embedText: buildEmbeddingText(from:), embed: ctx.embed)
+    let scopableGolden = RetrievalEvaluator.goldenSet.filter { $0.category != nil }
+    let scopableEdge = RetrievalEvaluator.edgeSet.filter { $0.category != nil }
+
+    print("\n— category-gate ablation (oracle ground-truth category, same subset) —")
+    print(RetrievalEvaluator.header())
+    let unscopedCore = RetrievalEvaluator.evaluate(label: "core | unscoped", corpus: corpus, weights: .current,
+                                                   tag: tag, queries: scopableGolden, embedQuery: ctx.embed)
+    let scopedCore = RetrievalEvaluator.evaluateScoped(label: "core | CATEGORY-SCOPED", corpus: corpus,
+                                                       weights: .current, tag: tag, queries: scopableGolden,
+                                                       embedQuery: ctx.embed)
+    print(RetrievalEvaluator.summaryLine(unscopedCore))
+    print(RetrievalEvaluator.summaryLine(scopedCore))
+    print("\n" + RetrievalEvaluator.details(scopedCore))
+    let unscopedEdge = RetrievalEvaluator.evaluate(label: "edge | unscoped", corpus: corpus, weights: .current,
+                                                   tag: tag, queries: scopableEdge, embedQuery: ctx.embed)
+    let scopedEdge = RetrievalEvaluator.evaluateScoped(label: "edge | CATEGORY-SCOPED", corpus: corpus,
+                                                       weights: .current, tag: tag, queries: scopableEdge,
+                                                       embedQuery: ctx.embed)
+    print(RetrievalEvaluator.summaryLine(unscopedEdge))
+    print(RetrievalEvaluator.summaryLine(scopedEdge))
+    print("\n" + RetrievalEvaluator.details(scopedEdge))
+}
+
 // Card display policy sweep: how aggressively to suppress the weaker second
 // card (margin = max confidence gap to the top hit; 99 disables the margin).
 if let ctx = backends.first(where: { $0.name == "ctx" }) {

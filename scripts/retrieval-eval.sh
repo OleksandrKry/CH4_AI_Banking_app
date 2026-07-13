@@ -27,6 +27,8 @@ xcrun swiftc -O \
   "$APP/RagComponents/ContextualEmbedder.swift" \
   "$APP/RagComponents/HybridRetriever.swift" \
   "$APP/RagComponents/IngestionTools.swift" \
+  "$APP/RagComponents/BankingDecisionTree.swift" \
+  "$APP/RagComponents/CategoryTaxonomy.swift" \
   "$TESTS/RetrievalEvaluator.swift" \
   scripts/retrieval-eval/main.swift \
   -o "$OUT"

@@ -52,6 +52,7 @@ private struct ChatScreen: View {
     var body: some View {
         VStack(spacing: 0) {
             header
+            availabilityBanner
 
             ScrollViewReader { proxy in
                 ScrollView {
@@ -132,6 +133,31 @@ private struct ChatScreen: View {
 
     private var greeting: some View {
         AssistantText(text: "Hi! I'm your BCA assistant. Ask me about loans, accounts, or cards — or start with one of these:")
+    }
+
+    /// Persistent, non-blocking notice when Apple Intelligence can't answer on
+    /// this device (ineligible hardware, disabled in Settings, or still
+    /// downloading) — explained once up front instead of only after a failed
+    /// send. Reads `RAGSystem.unavailabilityNotice` directly in `body`, so it
+    /// updates live if the user enables Apple Intelligence and comes back.
+    @ViewBuilder
+    private var availabilityBanner: some View {
+        if let notice = RAGSystem.unavailabilityNotice {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "sparkles")
+                    .foregroundStyle(Theme.textSecondary)
+                Text(notice)
+                    .font(.footnote)
+                    .foregroundStyle(Theme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Theme.surface1, in: RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Theme.hairline, lineWidth: 1))
+            .padding(.horizontal)
+            .padding(.top, 8)
+        }
     }
 
     @ViewBuilder

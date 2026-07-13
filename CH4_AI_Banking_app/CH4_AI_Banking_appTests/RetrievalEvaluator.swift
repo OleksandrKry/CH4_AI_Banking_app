@@ -24,11 +24,22 @@ import Foundation
 struct GoldenQuery {
     let text: String
     let expected: Set<String> // exact "Name" values from bca-products.json
+    /// Ground-truth taxonomy category, hand-authored — the input to the
+    /// category-gate ablation (`RetrievalEvaluator.evaluateScoped`), which
+    /// measures the retrieval-quality CEILING category-scoping buys, isolated
+    /// from the real on-device classifier's own accuracy (that's a separate,
+    /// model-gated concern — see RAGSystemTests). Left `nil` for queries whose
+    /// expected products genuinely span more than one taxonomy bucket (e.g.
+    /// the one-word "card" edge case spans both credit and debit cards) —
+    /// forcing a single category onto those would corrupt the measurement, so
+    /// `evaluateScoped` simply skips them.
+    let category: IntentCategory?
     let language: String
 
-    init(_ text: String, _ expected: Set<String>, language: String = "en") {
+    init(_ text: String, _ expected: Set<String>, category: IntentCategory? = nil, language: String = "en") {
         self.text = text
         self.expected = expected
+        self.category = category
         self.language = language
     }
 }
@@ -43,61 +54,63 @@ enum RetrievalEvaluator {
     static let goldenSet: [GoldenQuery] = [
         // Cards: premium/travel cluster
         GoldenQuery("Which credit card gives me airport lounge access?",
-                    ["BCA Mastercard World", "BCA American Express Platinum", "BCA JCB Black"]),
+                    ["BCA Mastercard World", "BCA American Express Platinum", "BCA JCB Black"],
+                    category: .creditCard),
         GoldenQuery("I want to earn Singapore Airlines miles when I spend",
                     ["BCA Singapore Airlines KrisFlyer Visa Signature",
                      "BCA Singapore Airlines KrisFlyer Visa Infinite",
-                     "BCA Singapore Airlines PPS Club Visa Infinite"]),
+                     "BCA Singapore Airlines PPS Club Visa Infinite"],
+                    category: .creditCard),
         GoldenQuery("Card with discounts for booking flights and hotels on tiket.com",
-                    ["BCA tiket.com Mastercard"]),
+                    ["BCA tiket.com Mastercard"], category: .creditCard),
         GoldenQuery("Is there a credit card with a Batman design?",
-                    ["BCA Visa Batman"]),
+                    ["BCA Visa Batman"], category: .creditCard),
         GoldenQuery("Entry level credit card for daily shopping and paying bills",
-                    ["BCA Everyday Card"]),
+                    ["BCA Everyday Card"], category: .creditCard),
         // Loans: the KPR cluster is the hardest confusable group in the corpus
         GoldenQuery("I want to buy my first house, which loan should I take?",
-                    ["KPR Pembelian"]),
+                    ["KPR Pembelian"], category: .housingLoan),
         GoldenQuery("Move my existing home loan from another bank to BCA for a lower rate",
-                    ["KPR BCA Take Over"]),
+                    ["KPR BCA Take Over"], category: .housingLoan),
         GoldenQuery("I need a loan to renovate and expand my house",
-                    ["KPR Renovasi"]),
+                    ["KPR Renovasi"], category: .housingLoan),
         GoldenQuery("I need cash and can use my house as collateral",
-                    ["KPR Refinancing"]),
+                    ["KPR Refinancing"], category: .housingLoan),
         GoldenQuery("Quick personal loan without any collateral",
-                    ["BCA Personal Loan"]),
+                    ["BCA Personal Loan"], category: .personalLoan),
         GoldenQuery("Financing to buy a new car",
-                    ["KKB BCA"]),
+                    ["KKB BCA"], category: .vehicleLoan),
         GoldenQuery("Installment loan for a new motorcycle",
-                    ["KSM BCA"]),
+                    ["KSM BCA"], category: .vehicleLoan),
         // Savings & investments
         GoldenQuery("Savings account for a student just starting to save",
-                    ["Tahapan Xpresi"]),
+                    ["Tahapan Xpresi"], category: .savingsAccount),
         GoldenQuery("I want to keep US dollars in a bank account",
-                    ["BCA Dollar Account"]),
+                    ["BCA Dollar Account"], category: .savingsAccount),
         GoldenQuery("Lock my money for a fixed guaranteed interest rate",
-                    ["Deposito Berjangka (Time Deposit)"]),
+                    ["Deposito Berjangka (Time Deposit)"], category: .investment),
         GoldenQuery("Low risk investment backed by the government",
-                    ["ORI / SBN (Government Bonds)"]),
+                    ["ORI / SBN (Government Bonds)"], category: .investment),
         // Transfers & payments: BI-FAST vs RTGS vs SWIFT is rank-order sensitive
         GoldenQuery("How do I send money to a bank account in Singapore?",
-                    ["SWIFT International Transfer"]),
+                    ["SWIFT International Transfer"], category: .transfersAndPayments),
         GoldenQuery("Cheapest way to instantly transfer money to another Indonesian bank",
-                    ["BI-FAST Transfer"]),
+                    ["BI-FAST Transfer"], category: .transfersAndPayments),
         GoldenQuery("I need to transfer five billion rupiah today, a very large amount",
-                    ["RTGS Transfer"]),
+                    ["RTGS Transfer"], category: .transfersAndPayments),
         // Debit cluster: GPN is local-only, the Mastercard debit works abroad
         GoldenQuery("Debit card I can use for online shopping on international websites",
-                    ["BCA Mastercard Debit"]),
+                    ["BCA Mastercard Debit"], category: .debitCard),
         // Indonesian queries — the contextual model is script-level multilingual,
         // the NLEmbedding fallback is English-only; these measure that gap.
         GoldenQuery("Kartu kredit untuk mengumpulkan miles Singapore Airlines",
                     ["BCA Singapore Airlines KrisFlyer Visa Signature",
                      "BCA Singapore Airlines KrisFlyer Visa Infinite",
                      "BCA Singapore Airlines PPS Club Visa Infinite"],
-                    language: "id"),
+                    category: .creditCard, language: "id"),
         GoldenQuery("Pinjaman untuk renovasi rumah",
                     ["KPR Renovasi"],
-                    language: "id"),
+                    category: .housingLoan, language: "id"),
     ]
 
     /// Out-of-scope queries: nothing in the corpus answers these. Their top-hit
@@ -145,18 +158,25 @@ enum RetrievalEvaluator {
     /// from the core set with looser floors.
     static let edgeSet: [GoldenQuery] = [
         // typos / sloppy input
-        GoldenQuery("kredit card for trvel miles", travelCards),
-        GoldenQuery("hoem loan to buy a huose", ["KPR Pembelian"]),
-        GoldenQuery("motorcyle lone", ["KSM BCA"]),
+        GoldenQuery("kredit card for trvel miles", travelCards, category: .creditCard),
+        GoldenQuery("hoem loan to buy a huose", ["KPR Pembelian"], category: .housingLoan),
+        GoldenQuery("motorcyle lone", ["KSM BCA"], category: .vehicleLoan),
         // code-switching
-        GoldenQuery("mau kartu kredit buat travel ke luar negeri", travelCards, language: "mix"),
-        GoldenQuery("transfer uang cepat dan murah antar bank", ["BI-FAST Transfer"], language: "id"),
-        // vague one-worders / dummy asks → right branch is a hit
+        GoldenQuery("mau kartu kredit buat travel ke luar negeri", travelCards,
+                    category: .creditCard, language: "mix"),
+        GoldenQuery("transfer uang cepat dan murah antar bank", ["BI-FAST Transfer"],
+                    category: .transfersAndPayments, language: "id"),
+        // Vague one-worders / dummy asks → right branch is a hit. `category` stays
+        // nil for these on purpose: "card" spans BOTH creditCard and debitCard,
+        // "loan" spans housingLoan+vehicleLoan+personalLoan, "savings" spans
+        // savingsAccount+investment (Deposito) — forcing a single ground-truth
+        // bucket onto a genuinely cross-category query would corrupt the
+        // category-gate ablation, so `evaluateScoped` skips these instead.
         GoldenQuery("card", allCards),
         GoldenQuery("loan", allLoans),
         GoldenQuery("savings", savingsProducts),
         GoldenQuery("i need money", allLoans),
-        GoldenQuery("invest", investments),
+        GoldenQuery("invest", investments, category: .investment), // all 3 candidates ARE .investment
     ]
 
     // MARK: - Corpus construction (mirrors app seeding, minus the LLM extraction)
@@ -252,6 +272,52 @@ enum RetrievalEvaluator {
         }
 
         let totalQueries = queries.count + negativeSet.count
+        let millis = Date().timeIntervalSince(start) * 1000 / Double(totalQueries)
+        return Report(label: label, outcomes: outcomes,
+                      negativeTopConfidences: negatives, meanQueryMillis: millis)
+    }
+
+    /// Oracle category-gate ablation: for queries with a hand-authored ground-
+    /// truth category, scopes candidates to `CategoryTaxonomy.documents(in:)`
+    /// BEFORE ranking — exactly what `RAGSystem.scoredSearchCore` does once
+    /// `RetrievalPlanner` supplies a category. This isolates the retrieval-
+    /// QUALITY benefit of scoping from the on-device classifier's own
+    /// accuracy, which needs real Apple Intelligence and can't run in this
+    /// headless harness (that's covered separately, in RAGSystemTests).
+    /// Queries without a ground-truth category (genuinely cross-category
+    /// one-worders) are skipped, so the comparison stays apples-to-apples
+    /// against `evaluate(queries:)` run over the SAME filtered subset.
+    static func evaluateScoped(
+        label: String,
+        corpus: [LocalDocument],
+        weights: HybridRetriever.Weights,
+        tag: String,
+        queries: [GoldenQuery] = goldenSet,
+        embedQuery: (String) -> [Double]?
+    ) -> Report {
+        let scopable = queries.filter { $0.category != nil }
+        let start = Date()
+
+        let outcomes = scopable.map { query -> QueryOutcome in
+            let candidates = CategoryTaxonomy.documents(in: query.category!, from: corpus)
+            let hits = Array(
+                HybridRetriever.rank(query: query.text, documents: candidates, weights: weights,
+                                     activeEmbeddingTag: tag, embedQuery: embedQuery)
+                    .prefix(5)
+            )
+            let rank = hits.firstIndex { query.expected.contains($0.document.id) }.map { $0 + 1 }
+            return QueryOutcome(query: query, hits: hits, firstExpectedRank: rank)
+        }
+
+        // Negatives have no ground-truth category by construction (nothing in
+        // the corpus answers them) — evaluated unscoped, same as `evaluate`.
+        let negatives = negativeSet.map { negative in
+            HybridRetriever.rank(query: negative, documents: corpus, weights: weights,
+                                 activeEmbeddingTag: tag, embedQuery: embedQuery)
+                .first?.confidence ?? 0
+        }
+
+        let totalQueries = max(1, scopable.count + negativeSet.count)
         let millis = Date().timeIntervalSince(start) * 1000 / Double(totalQueries)
         return Report(label: label, outcomes: outcomes,
                       negativeTopConfidences: negatives, meanQueryMillis: millis)
