@@ -8,6 +8,12 @@
 //  about already-shown products are answered from the session transcript. This
 //  keeps the 4,096-token context window for actual conversation.
 //
+//  Before ranking, every call goes through `RetrievalPlanner`: a separate,
+//  deterministic guided-generation request that classifies the need into one
+//  taxonomy category (from the full conversation, not just this turn's raw
+//  argument) and reflects the need into a clean retrieval query. Search is then
+//  SCOPED to that category — see RetrievalPlanner.swift for why this exists.
+//
 
 import Foundation
 import FoundationModels
@@ -41,11 +47,30 @@ final class ProductCatalogTool: Tool {
     /// session's context-budget estimate (4,096-token window).
     @MainActor private(set) var outputCharsThisTurn = 0
 
-    /// Hybrid scored search, injected by RAGSystem. Main-actor so all SwiftData
-    /// access stays on the context's actor even when the model calls concurrently.
-    private let search: @MainActor (String) -> [RetrievalHit]
+    /// Wall-clock for the WHOLE call — category/query planning plus the hybrid
+    /// search itself — fed into `RAGSystem.TurnMetrics.retrieval`.
+    @MainActor private(set) var lastCallDuration: Duration = .zero
 
-    init(search: @escaping @MainActor (String) -> [RetrievalHit]) {
+    /// The plan the last call produced (nil when planning failed/was skipped,
+    /// e.g. Apple Intelligence unavailable) — surfaced for debug logging.
+    @MainActor private(set) var lastPlan: RetrievalPlan?
+
+    /// Every user message in this conversation so far, oldest first — the
+    /// context `RetrievalPlanner` classifies against. Injected (rather than
+    /// fetched directly) so this tool stays SwiftData-free, like the rest of
+    /// RagComponents.
+    private let conversationUserInputs: @MainActor () -> [String]
+
+    /// Hybrid scored search, injected by RAGSystem, SCOPED to a taxonomy
+    /// category when the planner supplies one. Main-actor so all SwiftData
+    /// access stays on the context's actor even when the model calls concurrently.
+    private let search: @MainActor (String, IntentCategory?) -> [RetrievalHit]
+
+    init(
+        conversationUserInputs: @escaping @MainActor () -> [String],
+        search: @escaping @MainActor (String, IntentCategory?) -> [RetrievalHit]
+    ) {
+        self.conversationUserInputs = conversationUserInputs
         self.search = search
     }
 
@@ -53,11 +78,24 @@ final class ProductCatalogTool: Tool {
     @MainActor func beginTurn() {
         retrievedThisTurn = []
         outputCharsThisTurn = 0
+        lastCallDuration = .zero
+        lastPlan = nil
     }
 
     func call(arguments: Arguments) async throws -> String {
-        await MainActor.run {
-            let hits = search(arguments.query)
+        let clock = ContinuousClock()
+        let start = clock.now
+
+        // Plan on a SEPARATE session before touching retrieval at all — this is
+        // the gate: category classification + query reflection, deterministic,
+        // grounded in the whole conversation so far.
+        let history = await MainActor.run { conversationUserInputs() }
+        let plan = await RetrievalPlanner.plan(conversationMessages: history, toolQuery: arguments.query)
+
+        return await MainActor.run {
+            lastPlan = plan
+            let effectiveQuery = plan?.searchQuery ?? arguments.query
+            let hits = search(effectiveQuery, plan?.category)
             retrievedThisTurn.append(contentsOf: hits.map {
                 RetrievedProduct(id: $0.document.id, confidence: $0.confidence)
             })
@@ -69,6 +107,12 @@ final class ProductCatalogTool: Tool {
                 output = hits.map { Self.compactSummary(of: $0.document) }.joined(separator: "\n")
             }
             outputCharsThisTurn += output.count
+            lastCallDuration = start.duration(to: clock.now)
+            #if DEBUG
+            print(String(format: "🧭 plan: %@ → \"%@\" (%.0fms)",
+                         plan?.category.rawValue ?? "n/a (unscoped)", effectiveQuery,
+                         lastCallDuration / .milliseconds(1)))
+            #endif
             return output
         }
     }

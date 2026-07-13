@@ -136,6 +136,38 @@ struct RetrievalAccuracyTests {
         #expect(corpus.allSatisfy { !$0.chunk.isEmpty })
     }
 
+    /// R18: the corpus is hand-curated with an uncontrolled category vocabulary
+    /// (29 raw strings for 47 products as of this writing) — this test fails
+    /// the moment a new product introduces a raw category `CategoryTaxonomy`
+    /// doesn't know about, instead of that product silently becoming
+    /// unreachable through category-scoped retrieval.
+    @Test func categoryTaxonomyIsExhaustive() throws {
+        let rows = try RetrievalEvaluator.loadRows(from: productsJSONURL())
+        let rawCategories = Set(rows.map(\.category))
+        let unmapped = rawCategories.filter { CategoryTaxonomy.map[$0] == nil }
+        #expect(unmapped.isEmpty, "Unmapped product categories — add them to CategoryTaxonomy.map: \(unmapped.sorted())")
+    }
+
+    /// R18: scoping to a bucket returns ONLY products whose raw category maps
+    /// into it — the mechanism `RAGSystem.scoredSearchCore` relies on to keep
+    /// cross-category products out of the candidate set entirely.
+    @Test func categoryScopingContainsOnlyMatchingProducts() throws {
+        let rows = try RetrievalEvaluator.loadRows(from: productsJSONURL())
+        let corpus = RetrievalEvaluator.buildCorpus(
+            rows: rows, tag: "test", embedText: { _ in "" }, embed: { _ in nil })
+
+        let vehicleLoans = CategoryTaxonomy.documents(in: .vehicleLoan, from: corpus)
+        #expect(Set(vehicleLoans.map(\.id)) == ["KKB BCA", "KSM BCA"])
+        #expect(!vehicleLoans.contains { CategoryTaxonomy.bucket(for: $0.category) != .vehicleLoan })
+
+        // Every bucket partitions the corpus disjointly — a product with one
+        // raw category never appears under a DIFFERENT taxonomy bucket.
+        for category in IntentCategory.allCases where category != .general {
+            let scoped = CategoryTaxonomy.documents(in: category, from: corpus)
+            #expect(scoped.allSatisfy { CategoryTaxonomy.bucket(for: $0.category) == category })
+        }
+    }
+
     @Test func goldenQueriesReferenceRealProducts() throws {
         // Guards the golden + edge sets against corpus renames going stale.
         let names = Set(try RetrievalEvaluator.loadRows(from: productsJSONURL()).map(\.name))
@@ -197,6 +229,37 @@ struct RetrievalAccuracyTests {
 
         if ContextualEmbedder.shared.modelTag.hasPrefix("contextual") {
             #expect(edge.hitRate(at: 3) >= 0.6)
+        }
+
+        // R18: category-gate ablation — oracle ground-truth categories (no LLM
+        // call needed here; the real on-device classifier's OWN accuracy is
+        // verified separately in RAGSystemTests, which needs Apple
+        // Intelligence). Scoping must never make retrieval WORSE on queries
+        // where the true category is known — that would mean the taxonomy
+        // partition itself is broken — and on the edge (typo/vague) set it
+        // measurably RESCUES the cross-category failures unscoped retrieval
+        // can't avoid (e.g. "motorcyle lone" surfacing a travel credit card).
+        if ContextualEmbedder.shared.modelTag.hasPrefix("contextual") {
+            let scopableGolden = RetrievalEvaluator.goldenSet.filter { $0.category != nil }
+            let unscopedSubset = RetrievalEvaluator.evaluate(
+                label: "unscoped (scopable subset)", corpus: corpus, weights: .current, tag: tag,
+                queries: scopableGolden, embedQuery: { ContextualEmbedder.shared.vector(for: $0) })
+            let scoped = RetrievalEvaluator.evaluateScoped(
+                label: "scoped (oracle)", corpus: corpus, weights: .current, tag: tag,
+                queries: scopableGolden, embedQuery: { ContextualEmbedder.shared.vector(for: $0) })
+
+            print(RetrievalEvaluator.summaryLine(unscopedSubset))
+            print(RetrievalEvaluator.summaryLine(scoped))
+            #expect(scoped.hitRate(at: 1) >= unscopedSubset.hitRate(at: 1))
+            #expect(scoped.hitRate(at: 3) >= 0.95)
+
+            let scopableEdge = RetrievalEvaluator.edgeSet.filter { $0.category != nil }
+            let scopedEdge = RetrievalEvaluator.evaluateScoped(
+                label: "edge scoped (oracle)", corpus: corpus, weights: .current, tag: tag,
+                queries: scopableEdge, embedQuery: { ContextualEmbedder.shared.vector(for: $0) })
+            print(RetrievalEvaluator.summaryLine(scopedEdge))
+            print(RetrievalEvaluator.details(scopedEdge))
+            #expect(scopedEdge.hitRate(at: 1) >= 0.65)
         }
     }
 }

@@ -30,9 +30,12 @@ struct RetrievalHit {
     let rrfScore: Double
 
     /// Retrieval confidence in 0...1 = max(semantic contrast, keyword evidence).
-    /// Calibrated on the golden set (ctx | distilled | 0.4/1, 2026-07): all 22
-    /// positives scored ≥ 0.35 and all 3 out-of-scope negatives ≤ 0.34. The floor
-    /// `HybridRetriever.minimumConfidence` is tied to this definition —
+    /// Used for THRESHOLDING (floors, the card margin, the "recommended" badge)
+    /// — deliberately NOT the primary ranking key (see `rank`'s sort comment
+    /// for why a confidence-primary sort was tried and reverted). Calibrated on
+    /// the golden set (ctx | distilled, category-scoped, 2026-07): 22 positives
+    /// ranged 0.396–0.85 and 5 out-of-scope negatives ranged 0.29–0.37. The
+    /// floor `HybridRetriever.minimumConfidence` is tied to this definition —
     /// recalibrate with scripts/retrieval-eval.sh whenever it changes.
     var confidence: Double {
         let semantic = min(1, max(0, (vectorContrast ?? 0) * 10))
@@ -55,19 +58,23 @@ enum HybridRetriever {
 
     /// Calibrated floor under which a hit counts as "nothing relevant found":
     /// the pipeline then declines instead of pitching an unrelated product.
-    /// 0.25 sits under the weakest golden-set positive (0.35) with margin, so it
-    /// only drops clearly-ungrounded hits (no keyword match AND no cosine
-    /// contrast). Word-collision negatives (e.g. "visa requirements" vs. Visa
-    /// cards) are indistinguishable at the retrieval layer by design — the master
-    /// prompt's decline instruction handles those with the context in view.
+    /// 0.25 sits comfortably under the weakest golden-set positive (0.396 as of
+    /// 2026-07), so it only drops clearly-ungrounded hits (no keyword match AND
+    /// no cosine contrast) — it is NOT tuned to reject every out-of-scope
+    /// negative on its own (several sit above 0.25 too); that finer separation
+    /// is checked statistically (negative-max vs. positive-p25) in
+    /// RetrievalAccuracyTests, not by this hard floor. Word-collision negatives
+    /// (e.g. "visa requirements" vs. Visa cards) are indistinguishable at the
+    /// retrieval layer by design — the master prompt's decline instruction
+    /// handles those with the context in view.
     static let minimumConfidence = 0.25
 
     /// Card display policy: the best hit is always worth grounding on, but a
     /// TRAILING hit becomes a product card only when it clears `cardConfidence`
     /// AND sits within `cardMargin` of the top hit — a weak second product reads
-    /// as a wrong answer in the UI. Calibrated 2026-07 via the golden-set sweep
-    /// (scripts/retrieval-eval.sh): margin 0.10 lifts card precision 0.64 → 0.80
-    /// with recall unchanged at 0.91 — the margin only ever removes wrong cards.
+    /// as a wrong answer in the UI. Calibrated via the golden-set sweep
+    /// (scripts/retrieval-eval.sh): margin 0.10 lifts card precision without
+    /// ever costing recall — the margin only ever removes wrong cards.
     static let cardConfidence = 0.35
     static let cardMargin = 0.10
 
@@ -143,6 +150,25 @@ enum HybridRetriever {
                     rrfScore: rrfScores[doc.id] ?? 0
                 )
             }
+            // Primary key is `rrfScore`, NOT `confidence`. A confidence-primary
+            // sort was tried (2026-07) to fix one case — "Quick personal loan
+            // without any collateral" ranked "BCA Secured Personal Loan" above
+            // the correct unsecured "BCA Personal Loan" purely on a keyword-
+            // rank artifact — but it regressed others: `confidence`'s semantic
+            // term is a corpus-relative CONTRAST clamped to 1.0, and on some
+            // embedding backends/queries multiple unrelated documents clamp to
+            // the same ceiling, so the sort loses discrimination and a
+            // magnitude-noisy document (e.g. a debit card, on a "credit card
+            // with airport lounge access" query) can outrank the genuinely
+            // relevant one. Measured via scripts/retrieval-eval.sh +
+            // RAGSystemTests on-device: RRF fusion here is comparably or MORE
+            // accurate than confidence-primary once the category gate
+            // (RetrievalPlanner + CategoryTaxonomy) narrows candidates first —
+            // scoping fixes cross-category leakage structurally, which is what
+            // most confusable-cluster mistakes actually were. The residual
+            // same-category near-miss above is a harder, negation-blind-BM25
+            // problem for a future, more targeted fix — not a reason to make
+            // ranking globally less robust.
             .sorted { lhs, rhs in
                 if lhs.rrfScore != rhs.rrfScore { return lhs.rrfScore > rhs.rrfScore }
                 if (lhs.vectorScore ?? -2) != (rhs.vectorScore ?? -2) {
