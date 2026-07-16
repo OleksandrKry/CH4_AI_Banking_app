@@ -1,14 +1,26 @@
-# Arta AI — On-Device Banking Assistant
+<div align="center">
 
-**Understand your options. Choose with confidence.**
+<img src="docs/design/assets/app-icon.png" width="88" height="88" alt="Arta AI icon" />
 
-An on-device AI consultant that guides bank customers to the right product through natural conversation — nothing leaves the phone.
+# Arta AI
 
-🔗 **[Live site](https://oleksandrkry.github.io/CH4_AI_Banking_app/)**
+### On-device banking assistant — understand your options, choose with confidence.
 
 ![Swift](https://img.shields.io/badge/Swift-100%25-F05138?logo=swift&logoColor=white)
 ![Platform](https://img.shields.io/badge/Platform-iOS-000000?logo=apple&logoColor=white)
 ![Architecture](https://img.shields.io/badge/Architecture-On--Device%20RAG-5B9CF2)
+
+**[🔗 Live Site](https://oleksandrkry.github.io/CH4_AI_Banking_app/)** &nbsp;·&nbsp; **[📸 Screenshots](#-screenshots)** &nbsp;·&nbsp; **[🧠 Tech Stack](#-tech-stack)** &nbsp;·&nbsp; **[👥 Team](#-team)**
+
+</div>
+
+---
+
+## What it does
+
+Banks carry hundreds of products with different fees, benefits, and requirements — enough to confuse new and experienced customers alike. Arta AI answers natural-language questions, asks only the follow-up questions it actually needs, and recommends the right product from the bank's real catalog, entirely on-device.
+
+## 📸 Screenshots
 
 <p align="center">
   <img src="docs/screenshots/1.png" width="240" alt="Arta AI conversation screen">
@@ -16,11 +28,7 @@ An on-device AI consultant that guides bank customers to the right product throu
   <img src="docs/screenshots/2.png" width="240" alt="Arta AI product recommendation screen">
 </p>
 
-## What it does
-
-Banks carry hundreds of products with different fees, benefits, and requirements — enough to confuse new and experienced customers alike. Arta AI answers natural-language questions, asks only the follow-up questions it actually needs, and recommends the right product from the bank's real catalog, entirely on-device.
-
-## Tech stack
+## 🧠 Tech Stack
 
 | Framework | Role |
 |---|---|
@@ -31,7 +39,7 @@ Banks carry hundreds of products with different fees, benefits, and requirements
 
 **Architecture:** RAG with hybrid retrieval (vector + relational) · 100% Swift · fully on-edge, no server.
 
-## Team
+## 👥 Team
 
 | Name | Role |
 |---|---|
@@ -43,21 +51,12 @@ Banks carry hundreds of products with different fees, benefits, and requirements
 
 ---
 
-## Technical Exploration Report
-
-*The sections below document the team's process during the build — starting assumptions, what we tried, what surprised us, and how our decisions evolved.*
+<details>
+<summary><strong>📋 Technical Exploration Report</strong> — the team's process log: starting assumptions, what we tried, what surprised us, and how our decisions evolved (click to expand)</summary>
 
 # 1. Present Your Team
 
-## Team Members
-
-| Name | Role |
-|------|------|
-| Alex | Project Manager, Software Engineer |
-| Artem | Teamlead & Data Scientist |
-| Bagus | Backend & AI Engineer |
-| Raffi | Frontend Engineer |
-| Gian | Fullstack Engineer |
+*(See [Team](#-team) above.)*
 
 ## Project Overview
 
@@ -154,12 +153,7 @@ Potential topics include:
 
 ## About the Frameworks
 
-Our current architecture combines several Apple frameworks to provide an on-device AI experience.
-
-- **SpeechAnalyzer** converts spoken questions into text.
-- **Foundation Models** interpret user requests and generate responses.
-- **SwiftData** stores banking products, documentation, and conversation history.
-- **NLContextualEmbeddings** retrieves relevant information using semantic similarity.
+*(See [Tech Stack](#-tech-stack) above.)*
 
 During development, we will evaluate whether using semantic retrieval provides a measurable improvement over traditional keyword search.
 
@@ -204,3 +198,5 @@ No personal banking credentials, financial account information, or sensitive use
 - ✅ SwiftData implementation pending
 - ✅ Retrieval pipeline pending
 - ✅ Foundation Models integration pending
+
+</details>
